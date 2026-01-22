@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "MIMode": "gdb",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "environment": [],
+      "miDebuggerPath": "/usr/bin/gdb-multiarch",
+      "miDebuggerServerAddress": "127.0.0.1:1234",
+      "name": "Qemu lway Launch",
+      "program": "${workspaceFolder}/target/thumbv7neon-unknown-linux-gnueabihf/debug/lway",
+      "request": "launch",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "ignoreFailures": true,
+          "text": "-enable-pretty-printing"
+        }
+      ],
+      "stopAtEntry": true,
+      "type": "cppdbg"
+    }
+  ],
+  "version": "0.2.0"
+}

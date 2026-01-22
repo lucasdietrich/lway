@@ -1,0 +1,11 @@
+[toolchain]
+channel = "1.85.0"
+components = [
+  "rust-src",
+  "rustfmt",
+  "clippy",
+  # ???
+  # "rustfilt",
+]
+targets = ["thumbv7neon-unknown-linux-gnueabihf"]
+
