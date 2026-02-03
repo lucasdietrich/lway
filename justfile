@@ -28,6 +28,6 @@ test:
 clean:
   cargo clean
 
-target := "target"
+target := "amy"
 deploy: build
   scp {{exe}} {{target}}:~/
