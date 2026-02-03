@@ -1,0 +1,45 @@
+root@dk2:~# ./lway
+lway
+Starting /home/root/app 2
+Child pid: 507
+Starting /home/root/app 5
+Child pid: 508
+lway loop
+Hello, World!
+Running 2 iterations
+Tick 0
+Hello, World!
+Running 5 iterations
+Tick 0
+app: 507 waitpid -> 0 status: 0
+app: 508 waitpid -> 0 status: 0
+lway loop
+Tick 1
+Tick 1
+app: 507 waitpid -> 0 status: 0
+app: 508 waitpid -> 0 status: 0
+lway loop
+Completed 2 iterations. Exiting.
+Tick 2
+app: 507 waitpid -> 507 status: 0
+app 507 returned Terminated(
+    Completed {
+        ret: 0,
+    },
+)
+app: 508 waitpid -> 0 status: 0
+lway loop
+Tick 3
+app: 508 waitpid -> 0 status: 0
+lway loop
+Tick 4
+app: 508 waitpid -> 0 status: 0
+lway loop
+Completed 5 iterations. Exiting.
+app: 508 waitpid -> 508 status: 256
+app 508 returned Terminated(
+    Completed {
+        ret: 1,
+    },
+)
+all apps returned, exiting ...
