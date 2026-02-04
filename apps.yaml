@@ -1,0 +1,7 @@
+apps:
+  - command: "/home/root/app 2"
+    workdir: /home/root
+  - command: "/home/root/app 5"
+    workdir: /home/root
+  - command: "/home/root/app2 5"
+    workdir: /home/root

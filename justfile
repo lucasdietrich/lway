@@ -31,6 +31,7 @@ clean:
 target := "amy"
 deploy: build
   scp {{exe}} {{target}}:~/
+  scp apps.yaml {{target}}:~/
 
 app:
   bear -- $CC apps/app.c -o apps/app 

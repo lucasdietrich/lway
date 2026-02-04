@@ -1,0 +1,52 @@
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+pub struct AppConfig {
+    pub command: String,
+    pub workdir: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub apps: Vec<AppConfig>,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parser::Config;
+
+    use super::AppConfig;
+
+    #[test]
+    fn test_app_config() -> Result<(), Box<dyn std::error::Error>> {
+        // Example YAML config
+        let yaml = r#"
+command: "hello -v"
+workdir: workdir
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(cfg.command, "hello -v");
+        assert_eq!(cfg.workdir, "workdir");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_config() -> Result<(), Box<dyn std::error::Error>> {
+        // Example YAML config
+        let yaml = r#"
+apps:
+  - command: "app1 -a"
+    workdir: /path/to/app1
+  - command: "app2 -b"
+    workdir: /path/to/app2
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml)?;
+        assert_eq!(cfg.apps.len(), 2);
+        assert_eq!(cfg.apps[0].command, "app1 -a");
+        assert_eq!(cfg.apps[0].workdir, "/path/to/app1");
+        assert_eq!(cfg.apps[1].command, "app2 -b");
+        assert_eq!(cfg.apps[1].workdir, "/path/to/app2");
+        Ok(())
+    }
+}

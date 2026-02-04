@@ -3,12 +3,17 @@ name = "lway"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+
 [dependencies]
 libc = "0.2.180"
 thiserror = "2.0.18"
 
-[features]
-default = []
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+log = "0.4.29"
+simple_logger = "5.1.0"
 
 [dev-dependencies]
 
