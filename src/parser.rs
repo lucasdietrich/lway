@@ -2,6 +2,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
+    pub name: Option<String>,
     pub command: String,
     pub workdir: String,
 }

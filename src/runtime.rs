@@ -8,7 +8,7 @@ use std::{
 use libc::{c_char, dup2, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WNOHANG};
 use thiserror::Error;
 
-use crate::pipe::{Pipe, PipeReader};
+use crate::{logger::Logger, pipe::{Pipe, PipeReader}};
 
 #[derive(Debug, Error)]
 pub enum AppErr {
@@ -34,6 +34,7 @@ pub enum State {
 }
 
 pub struct App {
+    name: String,
     pid: i32,
     state: State,
     stdout: PipeReader,
@@ -50,11 +51,9 @@ fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
 }
 
 impl App {
-    pub fn start<'a>(app: &str, args: impl Iterator<Item = &'a str>) -> Result<Self, AppErr> {
-        let pipe_stdout = Pipe::new().expect("pipe stdout");
+    pub fn start<'a>(app_name: &str, app: &str, args: impl Iterator<Item = &'a str>) -> Result<Self, AppErr> {
+        let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
-
-        println!("Created pipes: {}, {}", pipe_stdout, pipe_stderr);
 
         let ret = unsafe { libc::fork() };
 
@@ -88,6 +87,7 @@ impl App {
             // parent
             log::info!("Child pid: {}", ret);
             Ok(App {
+                name: app_name.to_string(),
                 pid: ret,
                 state: State::Running,
                 stdout: pipe_stdout
@@ -102,7 +102,7 @@ impl App {
         }
     }
 
-    pub fn poll(&mut self) {
+    pub fn poll(&mut self, logger: &impl Logger) {
         if self.state != State::Running {
             // Nothing to do
             return;
@@ -112,6 +112,7 @@ impl App {
         let mut buf = vec![0u8; 1024];
         if let Ok(rcvd) = self.stdout.read(&mut buf) {
             log::info!("app {} rcvd {} bytes from stdout", self.pid, rcvd);
+            logger.log(&self.name, self.pid, &buf[..rcvd]).expect("log stdout");
         } else {
             log::debug!(
                 "app {} no data from stdout: {}",
@@ -122,7 +123,7 @@ impl App {
 
         if let Ok(rcvd) = self.stderr.read(&mut buf) {
             log::info!("app {} rcvd {} bytes from stderr", self.pid, rcvd);
-        } else {
+            logger.log(&self.name, self.pid, &buf[..rcvd]).expect("log stderr");
             log::debug!(
                 "app {} no data from stderr: {}",
                 self.pid,

@@ -1,7 +1,10 @@
 apps:
-  - command: "/home/root/app 2"
+  - name: "app1"
+    command: "/home/root/app 2"
     workdir: /home/root
-  - command: "/home/root/app 5"
+  - name: "app2"
+    command: "/home/root/app 5"
     workdir: /home/root
-  - command: "/home/root/app2 5"
+  - name: "app3"
+    command: "/home/root/app2 5"
     workdir: /home/root
