@@ -1,6 +1,7 @@
 use crate::{parser::Config, runtime::App};
 
 pub mod parser;
+pub mod pipe;
 pub mod runtime;
 
 const CONFIG: &str = "apps.yaml";
@@ -16,8 +17,11 @@ impl Runtime {
 }
 
 fn main() {
-    simple_logger::SimpleLogger::new().with_level(log::LevelFilter::Warn).init().expect("init logger");
-    
+    simple_logger::SimpleLogger::new()
+        .with_level(log::LevelFilter::Info)
+        .init()
+        .expect("init logger");
+
     let yaml = std::fs::read_to_string(CONFIG).expect("read config file");
     let cfg: Config = serde_yaml::from_str(&yaml).expect("parse config");
 

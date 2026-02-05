@@ -28,6 +28,10 @@ test:
 clean:
   cargo clean
 
+example EXAMPLE='pipe':
+  cargo build --example {{EXAMPLE}}
+  scp target/thumbv7neon-unknown-linux-gnueabihf/debug/examples/{{EXAMPLE}} {{target}}:~/
+
 target := "amy"
 deploy: build
   scp {{exe}} {{target}}:~/

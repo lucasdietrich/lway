@@ -1,7 +1,14 @@
-use std::{ffi::CString, str::FromStr};
+use std::{
+    ffi::CString,
+    io::{self, Read},
+    os::fd::AsRawFd,
+    str::FromStr,
+};
 
-use libc::{c_char, waitpid, WEXITSTATUS, WIFEXITED, WNOHANG};
+use libc::{c_char, dup2, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WNOHANG};
 use thiserror::Error;
+
+use crate::pipe::{Pipe, PipeReader};
 
 #[derive(Debug, Error)]
 pub enum AppErr {
@@ -9,6 +16,8 @@ pub enum AppErr {
     ForkFailed(i32),
     #[error("Execv failed {0}")]
     ExecvFailed(i32),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,14 +36,36 @@ pub enum State {
 pub struct App {
     pid: i32,
     state: State,
+    stdout: PipeReader,
+    stderr: PipeReader,
+}
+
+fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
+    let ret = unsafe { dup2(src.as_raw_fd(), dst.as_raw_fd()) };
+    if ret == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 impl App {
     pub fn start<'a>(app: &str, args: impl Iterator<Item = &'a str>) -> Result<Self, AppErr> {
+        let pipe_stdout = Pipe::new().expect("pipe stdout");
+        let pipe_stderr = Pipe::new().expect("pipe stderr");
+
+        println!("Created pipes: {}, {}", pipe_stdout, pipe_stderr);
+
         let ret = unsafe { libc::fork() };
 
         if ret == 0 {
             // child
+            let stdout = pipe_stdout.into_write_fd()?;
+            fd_dup(stdout, STDOUT_FILENO)?;
+
+            let stderr = pipe_stderr.into_write_fd()?;
+            fd_dup(stderr, STDERR_FILENO)?;
+
             let prog = CString::from_str(app).expect("app name");
             let args: Vec<CString> = args
                 .map(|arg| CString::from_str(arg).expect("arg"))
@@ -46,10 +77,12 @@ impl App {
             // execv expects a null-terminated array
             argv.push(std::ptr::null());
 
-            let ret = unsafe {
-                libc::execv(prog.as_ptr() as *const c_char, argv.as_ptr())
-            };
-            log::error!("execv returned {} errno: {}", ret, std::io::Error::last_os_error());
+            let ret = unsafe { libc::execvp(prog.as_ptr() as *const c_char, argv.as_ptr()) };
+            log::error!(
+                "execv returned {} errno: {}",
+                ret,
+                std::io::Error::last_os_error()
+            );
             Err(AppErr::ExecvFailed(ret))
         } else if ret > 0 {
             // parent
@@ -57,6 +90,12 @@ impl App {
             Ok(App {
                 pid: ret,
                 state: State::Running,
+                stdout: pipe_stdout
+                    .into_nonblocking_read_fd()
+                    .expect("nonblocking stdout"),
+                stderr: pipe_stderr
+                    .into_nonblocking_read_fd()
+                    .expect("nonblocking stderr"),
             })
         } else {
             Err(AppErr::ForkFailed(ret))
@@ -69,6 +108,29 @@ impl App {
             return;
         }
 
+        // Read stdout and stderr
+        let mut buf = vec![0u8; 1024];
+        if let Ok(rcvd) = self.stdout.read(&mut buf) {
+            log::info!("app {} rcvd {} bytes from stdout", self.pid, rcvd);
+        } else {
+            log::debug!(
+                "app {} no data from stdout: {}",
+                self.pid,
+                std::io::Error::last_os_error()
+            );
+        }
+
+        if let Ok(rcvd) = self.stderr.read(&mut buf) {
+            log::info!("app {} rcvd {} bytes from stderr", self.pid, rcvd);
+        } else {
+            log::debug!(
+                "app {} no data from stderr: {}",
+                self.pid,
+                std::io::Error::last_os_error()
+            );
+        }
+
+        // Poll state
         let mut status: i32 = 0;
         let options: i32 = WNOHANG;
         let ret = unsafe { waitpid(self.pid, &mut status, options) };

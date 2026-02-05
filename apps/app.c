@@ -17,6 +17,10 @@ void sigint(int signum) {
 }
 
 int main(int argc, char *argv[]) {
+    // set flush on for stdout and stderr
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     uint32_t i = 0;
     uint32_t max_iterations = 0; // 0 means infinite
     
@@ -26,6 +30,7 @@ int main(int argc, char *argv[]) {
     }
     
     printf("Hello, World!\n");
+    fprintf(stderr, "This is an error message\n");
     if (max_iterations == 0) {
         printf("Running infinite loop (max_iterations=0)\n");
     } else {
