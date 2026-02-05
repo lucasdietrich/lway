@@ -1,6 +1,6 @@
 use std::{
     ffi::CString,
-    io::{self, Read},
+    io::{self, Error, Read},
     os::fd::AsRawFd,
     str::FromStr,
 };
@@ -15,7 +15,7 @@ pub enum AppErr {
     #[error("Fork failed {0}")]
     ForkFailed(i32),
     #[error("Execv failed {0}")]
-    ExecvFailed(i32),
+    ExecvFailed(Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -29,13 +29,12 @@ pub enum ReturnState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    Running,
+    Running(i32), // Running with pid
     Terminated(ReturnState),
 }
 
 pub struct App {
     name: String,
-    pid: i32,
     state: State,
     stdout: PipeReader,
     stderr: PipeReader,
@@ -51,7 +50,7 @@ fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
 }
 
 impl App {
-    pub fn start<'a>(app_name: &str, app: &str, args: impl Iterator<Item = &'a str>) -> Result<Self, AppErr> {
+    pub fn start<'a>(app_name: &str, prog: &str, args: impl Iterator<Item = &'a str>) -> Result<Self, AppErr> {
         let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
 
@@ -65,7 +64,7 @@ impl App {
             let stderr = pipe_stderr.into_write_fd()?;
             fd_dup(stderr, STDERR_FILENO)?;
 
-            let prog = CString::from_str(app).expect("app name");
+            let prog = CString::from_str(prog).expect("app name");
             let args: Vec<CString> = args
                 .map(|arg| CString::from_str(arg).expect("arg"))
                 .collect();
@@ -77,19 +76,19 @@ impl App {
             argv.push(std::ptr::null());
 
             let ret = unsafe { libc::execvp(prog.as_ptr() as *const c_char, argv.as_ptr()) };
+            let error = std::io::Error::last_os_error();
             log::error!(
                 "execv returned {} errno: {}",
                 ret,
-                std::io::Error::last_os_error()
+                error,
             );
-            Err(AppErr::ExecvFailed(ret))
+            Err(AppErr::ExecvFailed(error))
         } else if ret > 0 {
             // parent
             log::info!("Child pid: {}", ret);
             Ok(App {
                 name: app_name.to_string(),
-                pid: ret,
-                state: State::Running,
+                state: State::Running(ret),
                 stdout: pipe_stdout
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stdout"),
@@ -103,30 +102,29 @@ impl App {
     }
 
     pub fn poll(&mut self, logger: &impl Logger) {
-        if self.state != State::Running {
-            // Nothing to do
+        let State::Running(pid) = self.state else {
             return;
-        }
+        };
 
         // Read stdout and stderr
         let mut buf = vec![0u8; 1024];
         if let Ok(rcvd) = self.stdout.read(&mut buf) {
-            log::info!("app {} rcvd {} bytes from stdout", self.pid, rcvd);
-            logger.log(&self.name, self.pid, &buf[..rcvd]).expect("log stdout");
+            log::info!("app {} rcvd {} bytes from stdout", pid, rcvd);
+            logger.log(&self.name, pid, &buf[..rcvd]).expect("log stdout");
         } else {
             log::debug!(
                 "app {} no data from stdout: {}",
-                self.pid,
+                pid,
                 std::io::Error::last_os_error()
             );
         }
 
         if let Ok(rcvd) = self.stderr.read(&mut buf) {
-            log::info!("app {} rcvd {} bytes from stderr", self.pid, rcvd);
-            logger.log(&self.name, self.pid, &buf[..rcvd]).expect("log stderr");
+            log::info!("app {} rcvd {} bytes from stderr", pid, rcvd);
+            logger.log(&self.name, pid, &buf[..rcvd]).expect("log stderr");
             log::debug!(
                 "app {} no data from stderr: {}",
-                self.pid,
+                pid,
                 std::io::Error::last_os_error()
             );
         }
@@ -134,10 +132,10 @@ impl App {
         // Poll state
         let mut status: i32 = 0;
         let options: i32 = WNOHANG;
-        let ret = unsafe { waitpid(self.pid, &mut status, options) };
-        log::debug!("app: {} waitpid -> {} status: {}", self.pid, ret, status);
+        let ret = unsafe { waitpid(pid, &mut status, options) };
+        log::debug!("app: {} waitpid -> {} status: {}", pid, ret, status);
 
-        if ret == self.pid {
+        if ret == pid {
             // children exited
 
             // parse status
@@ -149,7 +147,7 @@ impl App {
                 false => ReturnState::Abnormal,
             };
             self.state = State::Terminated(return_state);
-            log::info!("app {} returned {:?}", self.pid, self.state);
+            log::info!("app {} returned {:?}", pid, self.state);
         } else if ret == 0 {
             // waiting
         } else {
@@ -158,6 +156,6 @@ impl App {
     }
 
     pub fn is_running(&self) -> bool {
-        self.state == State::Running
+        matches!(self.state, State::Running(_))
     }
 }
