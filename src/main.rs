@@ -40,11 +40,12 @@ impl Runtime {
 fn main() {
     // Parse command-line arguments to determine verbosity level
     let args: Vec<String> = std::env::args().collect();
-    let verbosity = args.iter()
+    let verbosity = args
+        .iter()
         .filter(|arg| arg.starts_with("-v"))
         .map(|arg| arg.chars().filter(|&c| c == 'v').count())
         .sum::<usize>();
-    
+
     let log_level = match verbosity {
         0 => log::LevelFilter::Off,
         1 => log::LevelFilter::Error,
@@ -53,7 +54,7 @@ fn main() {
         4 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
-    
+
     simple_logger::SimpleLogger::new()
         .with_level(log_level)
         .init()
@@ -77,6 +78,17 @@ fn main() {
         log::info!("Starting {}", app_cfg.command);
         let parts: Vec<&str> = app_cfg.command.split(' ').collect();
         let name = app_cfg.name.as_deref().unwrap_or(parts[0]);
+        let env: Vec<String> = app_cfg
+            .env
+            .as_ref()
+            .map(|env_map| {
+                env_map
+                    .iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect()
+            })
+            .unwrap_or_else(Vec::new);
+
         let params = runtime::AppParams {
             cwd: app_cfg.workdir.as_deref(),
             name,
@@ -84,6 +96,7 @@ fn main() {
             args: &parts,
             uid: app_cfg.uid,
             gid: app_cfg.gid,
+            env,
         };
 
         let app = App::start(params).expect("run_app");

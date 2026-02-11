@@ -1,11 +1,19 @@
 use std::{
-    ffi::CString, fmt::Display, io::{self, Error, Read}, os::fd::AsRawFd, str::FromStr
+    ffi::CString,
+    fmt::Display,
+    io::{self, Error, Read},
+    os::fd::AsRawFd,
+    str::FromStr,
 };
 
 use libc::{c_char, dup2, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WNOHANG};
 use thiserror::Error;
 
-use crate::{logger::Logger, pipe::{Pipe, PipeReader}, utils::to_ioresult};
+use crate::{
+    logger::Logger,
+    pipe::{Pipe, PipeReader},
+    utils::to_ioresult,
+};
 
 #[derive(Debug, Error)]
 pub enum AppErr {
@@ -30,14 +38,15 @@ pub enum State {
     Terminated(ReturnState),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppParams<'a>{
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppParams<'a> {
     pub cwd: Option<&'a str>,
     pub name: &'a str,
     pub prog: &'a str,
     pub args: &'a [&'a str],
     pub uid: Option<u32>,
     pub gid: Option<u32>,
+    pub env: Vec<String>,
 }
 
 pub struct App {
@@ -69,7 +78,8 @@ impl App {
             fd_dup(stderr, STDERR_FILENO)?;
 
             let prog = CString::from_str(params.prog).expect("app name");
-            let args: Vec<CString> = params.args
+            let args: Vec<CString> = params
+                .args
                 .iter()
                 .map(|arg| CString::from_str(arg).expect("arg"))
                 .collect();
@@ -111,7 +121,18 @@ impl App {
                     AppErr::Io(e)
                 })?;
             }
-            
+
+            // Build environment variables
+            let env: Vec<CString> = params
+                .env
+                .iter()
+                .map(|env| CString::from_str(env).expect("env"))
+                .collect();
+            let mut envp: Vec<*const c_char> = env
+                .iter()
+                .map(|cstring| cstring.as_ptr() as *const c_char)
+                .collect();
+            envp.push(std::ptr::null());
 
             // Set working directory if specified
             if let Some(cwd) = params.cwd {
@@ -124,13 +145,11 @@ impl App {
                 })?;
             }
 
-            let ret = unsafe { libc::execvp(prog.as_ptr() as *const c_char, argv.as_ptr()) };
+            let ret = unsafe {
+                libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())
+            };
             let error = std::io::Error::last_os_error();
-            log::error!(
-                "execv returned {} errno: {}",
-                ret,
-                error,
-            );
+            log::error!("execv returned {} errno: {}", ret, error,);
             Err(AppErr::ExecvFailed(error))
         } else if ret > 0 {
             // parent
@@ -159,7 +178,9 @@ impl App {
         let mut buf = vec![0u8; 1024];
         if let Ok(rcvd) = self.stdout.read(&mut buf) {
             log::debug!("app {} rcvd {} bytes from stdout", pid, rcvd);
-            logger.log(&self.name, pid, &buf[..rcvd]).expect("log stdout");
+            logger
+                .log(&self.name, pid, &buf[..rcvd])
+                .expect("log stdout");
         } else {
             log::debug!(
                 "app {} no data from stdout: {}",
@@ -170,7 +191,9 @@ impl App {
 
         if let Ok(rcvd) = self.stderr.read(&mut buf) {
             log::debug!("app {} rcvd {} bytes from stderr", pid, rcvd);
-            logger.log(&self.name, pid, &buf[..rcvd]).expect("log stderr");
+            logger
+                .log(&self.name, pid, &buf[..rcvd])
+                .expect("log stderr");
             log::debug!(
                 "app {} no data from stderr: {}",
                 pid,
@@ -214,7 +237,7 @@ impl App {
         };
 
         let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
-        println!("app {} kill -> {}", pid, ret);
+        log::info!("app {} kill -> {}", pid, ret);
         to_ioresult(ret)?;
         Ok(())
     }

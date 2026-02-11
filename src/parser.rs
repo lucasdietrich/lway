@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -7,6 +9,7 @@ pub struct AppConfig {
     pub workdir: Option<String>,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
+    pub env: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,15 +48,38 @@ apps:
     workdir: /path/to/app2
     uid: 1000
     gid: 1000
+  - command: "app3"
+    env:
+      VAR1: value1
+      VAR2: value2
 "#;
         let cfg: Config = serde_yaml::from_str(yaml)?;
-        assert_eq!(cfg.apps.len(), 2);
+        assert_eq!(cfg.apps.len(), 3);
         assert_eq!(cfg.apps[0].command, "app1 -a");
         assert_eq!(cfg.apps[0].workdir.as_deref(), Some("/path/to/app1"));
         assert_eq!(cfg.apps[1].command, "app2 -b");
         assert_eq!(cfg.apps[1].workdir.as_deref(), Some("/path/to/app2"));
         assert_eq!(cfg.apps[1].uid, Some(1000));
         assert_eq!(cfg.apps[1].gid, Some(1000));
+        assert_eq!(cfg.apps[2].command, "app3");
+        assert_eq!(
+            cfg.apps[2]
+                .env
+                .as_ref()
+                .unwrap()
+                .get("VAR1")
+                .map(String::as_str),
+            Some("value1")
+        );
+        assert_eq!(
+            cfg.apps[2]
+                .env
+                .as_ref()
+                .unwrap()
+                .get("VAR2")
+                .map(String::as_str),
+            Some("value2")
+        );
         Ok(())
     }
 }
