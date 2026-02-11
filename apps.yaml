@@ -1,10 +1,12 @@
 apps:
+  - name: id-root
+    command: id
+  - name: id-user
+    command: id
+    uid: 1001
+    gid: 1001
   - name: "app1"
-    command: "/home/root/app 2"
+    command: "/home/root/app 10"
     workdir: /home/root
-  - name: "app2"
-    command: "/home/root/app 5"
-    workdir: /home/root
-  - name: "app3"
-    command: "/home/root/app2 5"
-    workdir: /home/root
+  - name: invalid
+    command: invalid

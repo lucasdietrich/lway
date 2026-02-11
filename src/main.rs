@@ -1,9 +1,14 @@
+use std::sync::atomic;
+
+use libc::SIGINT;
+
 use crate::{parser::Config, runtime::App};
 
 pub mod logger;
 pub mod parser;
 pub mod pipe;
 pub mod runtime;
+pub mod utils;
 
 const CONFIG: &str = "apps.yaml";
 
@@ -11,8 +16,23 @@ pub struct Runtime {
     pub apps: Vec<App>,
 }
 
+const FLAG_INT_RECEIVED: usize = 1 << 0;
+static FLAGS: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+
+extern "C" fn handler(signal: i32) {
+    println!("Received signal: {}", signal);
+    if signal == SIGINT {
+        if FLAGS.fetch_or(FLAG_INT_RECEIVED, atomic::Ordering::SeqCst) & FLAG_INT_RECEIVED != 0 {
+            println!("Second SIGINT received, exiting immediately");
+            std::process::exit(1);
+        } else {
+            println!("SIGINT received, sending SIGTERM to all child processes");
+        }
+    }
+}
+
 impl Runtime {
-    pub fn new() -> Self {
+    pub fn init() -> Self {
         Runtime { apps: Vec::new() }
     }
 }
@@ -44,18 +64,33 @@ fn main() {
 
     log::info!("{:#?}", cfg);
 
-    let mut rt = Runtime::new();
+    let ret = unsafe { libc::signal(SIGINT, handler as libc::sighandler_t) };
+    if ret == libc::SIG_ERR {
+        log::error!("Failed to set signal handler");
+        std::process::exit(1);
+    }
+
+    let mut rt = Runtime::init();
     let logger = logger::StdoutLogger;
 
     for app_cfg in cfg.apps.iter() {
         log::info!("Starting {}", app_cfg.command);
         let parts: Vec<&str> = app_cfg.command.split(' ').collect();
-        let app_name = app_cfg.name.as_deref().unwrap_or(parts[0]);
-        let app = App::start(app_name, parts[0], parts.into_iter()).expect("run_app");
+        let name = app_cfg.name.as_deref().unwrap_or(parts[0]);
+        let params = runtime::AppParams {
+            cwd: app_cfg.workdir.as_deref(),
+            name,
+            prog: parts[0],
+            args: &parts,
+            uid: app_cfg.uid,
+            gid: app_cfg.gid,
+        };
+
+        let app = App::start(params).expect("run_app");
         rt.apps.push(app);
     }
 
-    loop {
+    while FLAGS.load(atomic::Ordering::SeqCst) & FLAG_INT_RECEIVED == 0 {
         unsafe {
             libc::sleep(1);
         }
@@ -67,6 +102,13 @@ fn main() {
         if rt.apps.iter().all(|app| !app.is_running()) {
             log::info!("all apps returned, exiting ...");
             break;
+        }
+    }
+
+    // Send SIGTERM to all child processes
+    for app in rt.apps.iter() {
+        if let Err(e) = app.sigterm() {
+            log::error!("Failed to send SIGTERM to {}: {}", app, e);
         }
     }
 }

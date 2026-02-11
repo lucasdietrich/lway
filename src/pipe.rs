@@ -9,6 +9,8 @@ use std::{
 
 use libc::pipe;
 
+use crate::utils::to_ioresult;
+
 pub struct PipeReader(OwnedFd);
 pub struct PipeWriter(OwnedFd);
 
@@ -54,21 +56,14 @@ impl Pipe {
     pub fn new() -> io::Result<Pipe> {
         let mut pipefd = [-1; 2];
         let ret = unsafe { pipe(&mut pipefd as *mut c_int) };
-        if ret == 0 {
-            Ok(Pipe(pipefd))
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
+        to_ioresult(ret)?;
+        Ok(Pipe(pipefd))
     }
 
     pub fn into_read_fd(self) -> io::Result<PipeReader> {
         // Close write end
         let ret = unsafe { libc::close(self.0[1]) };
-
-        if ret == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-
+        to_ioresult(ret)?;
         Ok(PipeReader(unsafe { OwnedFd::from_raw_fd(self.0[0]) }))
     }
 
@@ -77,23 +72,16 @@ impl Pipe {
 
         let fd = reader.0.as_raw_fd();
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
+        let flags = to_ioresult(flags)?;
         let ret = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-        if ret == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
+        to_ioresult(ret)?;
         Ok(reader)
     }
 
     pub fn into_write_fd(self) -> io::Result<PipeWriter> {
         // Close read end
         let ret = unsafe { libc::close(self.0[0]) };
-
-        if ret == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
+        to_ioresult(ret)?;
 
         Ok(PipeWriter(unsafe { OwnedFd::from_raw_fd(self.0[1]) }))
     }

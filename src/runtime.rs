@@ -1,14 +1,11 @@
 use std::{
-    ffi::CString,
-    io::{self, Error, Read},
-    os::fd::AsRawFd,
-    str::FromStr,
+    ffi::CString, fmt::Display, io::{self, Error, Read}, os::fd::AsRawFd, str::FromStr
 };
 
 use libc::{c_char, dup2, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WNOHANG};
 use thiserror::Error;
 
-use crate::{logger::Logger, pipe::{Pipe, PipeReader}};
+use crate::{logger::Logger, pipe::{Pipe, PipeReader}, utils::to_ioresult};
 
 #[derive(Debug, Error)]
 pub enum AppErr {
@@ -33,6 +30,16 @@ pub enum State {
     Terminated(ReturnState),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppParams<'a>{
+    pub cwd: Option<&'a str>,
+    pub name: &'a str,
+    pub prog: &'a str,
+    pub args: &'a [&'a str],
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
 pub struct App {
     name: String,
     state: State,
@@ -42,15 +49,12 @@ pub struct App {
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
     let ret = unsafe { dup2(src.as_raw_fd(), dst.as_raw_fd()) };
-    if ret == -1 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    to_ioresult(ret)?;
+    Ok(())
 }
 
 impl App {
-    pub fn start<'a>(app_name: &str, prog: &str, args: impl Iterator<Item = &'a str>) -> Result<Self, AppErr> {
+    pub fn start<'a>(params: AppParams<'a>) -> Result<Self, AppErr> {
         let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
 
@@ -64,8 +68,9 @@ impl App {
             let stderr = pipe_stderr.into_write_fd()?;
             fd_dup(stderr, STDERR_FILENO)?;
 
-            let prog = CString::from_str(prog).expect("app name");
-            let args: Vec<CString> = args
+            let prog = CString::from_str(params.prog).expect("app name");
+            let args: Vec<CString> = params.args
+                .iter()
                 .map(|arg| CString::from_str(arg).expect("arg"))
                 .collect();
             let mut argv: Vec<*const c_char> = args
@@ -74,6 +79,50 @@ impl App {
                 .collect();
             // execv expects a null-terminated array
             argv.push(std::ptr::null());
+
+            // let ret = unsafe {
+            //     libc::setsid()
+            // };
+            // if ret == -1 {
+            //     let error = std::io::Error::last_os_error();
+            //     log::error!("setsid failed: {}", error);
+            //     return Err(AppErr::Io(error));
+            // }
+
+            // Set uid and gid if specified
+            // let ret = unsafe { libc::setgroups(0, std::ptr::null()) };
+            // to_ioresult(ret).map_err(|e| {
+            //     log::error!("setgroups failed: {}", e);
+            //     AppErr::Io(e)
+            // })?;
+            if let Some(gid) = params.gid {
+                log::info!("Setting gid to {}", gid);
+                let ret = unsafe { libc::setgid(gid) };
+                to_ioresult(ret).map_err(|e| {
+                    log::error!("setgid failed: {}", e);
+                    AppErr::Io(e)
+                })?;
+            }
+            if let Some(uid) = params.uid {
+                log::info!("Setting uid to {}", uid);
+                let ret = unsafe { libc::setuid(uid) };
+                to_ioresult(ret).map_err(|e| {
+                    log::error!("setuid failed: {}", e);
+                    AppErr::Io(e)
+                })?;
+            }
+            
+
+            // Set working directory if specified
+            if let Some(cwd) = params.cwd {
+                log::info!("Changing working directory to {}", cwd);
+                let cwd_cstr = CString::from_str(cwd).expect("cwd");
+                let ret = unsafe { libc::chdir(cwd_cstr.as_ptr()) };
+                to_ioresult(ret).map_err(|e| {
+                    log::error!("chdir failed: {}", e);
+                    AppErr::Io(e)
+                })?;
+            }
 
             let ret = unsafe { libc::execvp(prog.as_ptr() as *const c_char, argv.as_ptr()) };
             let error = std::io::Error::last_os_error();
@@ -87,7 +136,7 @@ impl App {
             // parent
             log::info!("Child pid: {}", ret);
             Ok(App {
-                name: app_name.to_string(),
+                name: params.name.to_string(),
                 state: State::Running(ret),
                 stdout: pipe_stdout
                     .into_nonblocking_read_fd()
@@ -109,7 +158,7 @@ impl App {
         // Read stdout and stderr
         let mut buf = vec![0u8; 1024];
         if let Ok(rcvd) = self.stdout.read(&mut buf) {
-            log::info!("app {} rcvd {} bytes from stdout", pid, rcvd);
+            log::debug!("app {} rcvd {} bytes from stdout", pid, rcvd);
             logger.log(&self.name, pid, &buf[..rcvd]).expect("log stdout");
         } else {
             log::debug!(
@@ -120,7 +169,7 @@ impl App {
         }
 
         if let Ok(rcvd) = self.stderr.read(&mut buf) {
-            log::info!("app {} rcvd {} bytes from stderr", pid, rcvd);
+            log::debug!("app {} rcvd {} bytes from stderr", pid, rcvd);
             logger.log(&self.name, pid, &buf[..rcvd]).expect("log stderr");
             log::debug!(
                 "app {} no data from stderr: {}",
@@ -157,5 +206,22 @@ impl App {
 
     pub fn is_running(&self) -> bool {
         matches!(self.state, State::Running(_))
+    }
+
+    pub fn sigterm(&self) -> io::Result<()> {
+        let State::Running(pid) = self.state else {
+            return Ok(());
+        };
+
+        let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+        println!("app {} kill -> {}", pid, ret);
+        to_ioresult(ret)?;
+        Ok(())
+    }
+}
+
+impl Display for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "App {{ name: {}, state: {:?} }}", self.name, self.state)
     }
 }
