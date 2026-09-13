@@ -1,5 +1,8 @@
 {
   "files.autoSave": "off",
   "rust-analyzer.cargo.extraEnv": {},
-  "rust-analyzer.cargo.target": "thumbv7neon-unknown-linux-gnueabihf"
+  // "rust-analyzer.cargo.target": "thumbv7neon-unknown-linux-gnueabihf",
+  "rust-analyzer.cargo.target": "aarch64-unknown-linux-gnu",
+  "rust-analyzer.check.targets": ["aarch64-unknown-linux-gnu"],
+
 }

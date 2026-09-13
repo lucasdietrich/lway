@@ -65,7 +65,7 @@ fn main() {
 
     log::info!("{:#?}", cfg);
 
-    let ret = unsafe { libc::signal(SIGINT, handler as libc::sighandler_t) };
+    let ret = unsafe { libc::signal(SIGINT, handler as *const () as libc::sighandler_t) };
     if ret == libc::SIG_ERR {
         log::error!("Failed to set signal handler");
         std::process::exit(1);

@@ -9,7 +9,7 @@ qemu-debug *args: build
 
 disassemble: build
   scripts/disassemble.sh {{exe}}
-exe := "target/thumbv7neon-unknown-linux-gnueabihf/debug/lway"
+exe := "target/aarch64-unknown-linux-gnu/debug/lway"
 
 build: debug
 
@@ -30,9 +30,9 @@ clean:
 
 example EXAMPLE='pipe':
   cargo build --example {{EXAMPLE}}
-  scp target/thumbv7neon-unknown-linux-gnueabihf/debug/examples/{{EXAMPLE}} {{target}}:~/
+  scp target/aarch64-unknown-linux-gnu/debug/examples/{{EXAMPLE}} {{target}}:~/
 
-target := "amy"
+target := "mpx.usb"
 deploy: build
   scp {{exe}} {{target}}:~/
   scp apps.yaml {{target}}:~/
