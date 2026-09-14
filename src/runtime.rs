@@ -6,13 +6,14 @@ use std::{
     str::FromStr,
 };
 
-use libc::{c_char, dup2, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WNOHANG};
+use cgroups_rs::fs::Cgroup;
+use libc::{
+    STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG, WTERMSIG, c_char, dup2, pid_t, waitpid,
+};
 use thiserror::Error;
 
 use crate::{
-    logger::Logger,
-    pipe::{Pipe, PipeReader},
-    utils::to_ioresult,
+    cgroups::init_app_cgroup, logger::Logger, pipe::{Pipe, PipeReader}, support::signal::signal_name, utils::to_ioresult,
 };
 
 #[derive(Debug, Error)]
@@ -34,7 +35,7 @@ pub enum ReturnState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    Running(i32), // Running with pid
+    Running(u32), // Running with pid
     Terminated(ReturnState),
 }
 
@@ -47,6 +48,7 @@ pub struct AppParams<'a> {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub env: Vec<String>,
+    pub cpu_weight: Option<u64>,
 }
 
 pub struct App {
@@ -54,6 +56,7 @@ pub struct App {
     state: State,
     stdout: PipeReader,
     stderr: PipeReader,
+    cgroup: Cgroup,
 }
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
@@ -152,21 +155,36 @@ impl App {
             log::error!("execv returned {} errno: {}", ret, error,);
             Err(AppErr::ExecvFailed(error))
         } else if ret > 0 {
+            let pid = ret as u32;
+            let cgroup = init_app_cgroup(params.name, pid, params.cpu_weight);
+
             // parent
             log::info!("Child pid: {}", ret);
             Ok(App {
                 name: params.name.to_string(),
-                state: State::Running(ret),
+                state: State::Running(pid),
                 stdout: pipe_stdout
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stdout"),
                 stderr: pipe_stderr
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stderr"),
+                cgroup,
             })
         } else {
             Err(AppErr::ForkFailed(ret))
         }
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        match self.state {
+            State::Running(pid) => Some(pid),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     pub fn poll(&mut self, logger: &dyn Logger) {
@@ -204,11 +222,22 @@ impl App {
         // Poll state
         let mut status: i32 = 0;
         let options: i32 = WNOHANG;
-        let ret = unsafe { waitpid(pid, &mut status, options) };
+        let ret = unsafe { waitpid(pid as pid_t, &mut status, options) };
         log::debug!("app: {} waitpid -> {} status: {}", pid, ret, status);
 
-        if ret == pid {
+        if ret == pid as pid_t {
             // children exited
+
+            let signaled = WIFSIGNALED(status);
+            if signaled {
+                let termsig = WTERMSIG(status);
+                log::info!(
+                    "app {} terminated by signal {} ({})",
+                    pid,
+                    signal_name(termsig as usize).unwrap_or("UNKNOWN"),
+                    termsig
+                );
+            }
 
             // parse status
             let normal = WIFEXITED(status);
@@ -236,9 +265,21 @@ impl App {
             return Ok(());
         };
 
-        let ret = unsafe { libc::kill(pid, libc::SIGTERM) };
+        let ret = unsafe { libc::kill(pid as pid_t, libc::SIGTERM) };
         log::info!("app {} kill -> {}", pid, ret);
         to_ioresult(ret)?;
+        Ok(())
+    }
+
+    pub fn terminate(&self) -> io::Result<()> {
+        if let State::Running(pid) = self.state {
+            let ret = unsafe { libc::kill(pid as pid_t, libc::SIGKILL) };
+            log::info!("app {} kill -> {}", pid, ret);
+            if let Ok(err) = to_ioresult(ret) {
+                log::error!("Failed to send SIGKILL to app {}: {}", pid, err);
+            }
+        }
+
         Ok(())
     }
 }
@@ -246,5 +287,16 @@ impl App {
 impl Display for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "App {{ name: {}, state: {:?} }}", self.name, self.state)
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        println!("Dropping app: {}", self.name);
+        if let State::Terminated(_) = self.state {
+            if let Err(err) = self.cgroup.delete() {
+                log::error!("Failed to delete app cgroup: {}", err);
+            }
+        }
     }
 }

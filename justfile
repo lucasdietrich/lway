@@ -33,10 +33,16 @@ example EXAMPLE='pipe':
   scp target/aarch64-unknown-linux-gnu/debug/examples/{{EXAMPLE}} {{target}}:~/
 
 target := "mpx.usb"
-deploy: build
-  scp {{exe}} {{target}}:~/
+deploy-config:
   scp apps.yaml {{target}}:~/
+
+deploy: build deploy-config
+  scp {{exe}} {{target}}:~/
 
 app:
   bear -- $CC apps/app.c -o apps/app 
   scp apps/app {{target}}:~/
+
+ctest: deploy-config
+  . ./.env && $CC apps/test.c -o apps/test
+  scp apps/test {{target}}:~/

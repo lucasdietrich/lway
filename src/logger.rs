@@ -1,30 +1,29 @@
 use std::error::Error;
 
 pub trait Logger {
-    fn log_str(&self, name: &str, pid: i32, msg: &str) -> Result<(), Box<dyn Error>> {
+    fn log_str(&self, name: &str, pid: u32, msg: &str) -> Result<(), Box<dyn Error>> {
         self.log(name, pid, msg.as_bytes())
     }
 
-    fn log(&self, name: &str, pid: i32, bytes: &[u8]) -> Result<(), Box<dyn Error>>;
+    fn log(&self, name: &str, pid: u32, bytes: &[u8]) -> Result<(), Box<dyn Error>>;
 }
 
 pub struct StdoutLogger;
 
 impl Logger for StdoutLogger {
-    fn log(&self, name: &str, pid: i32, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    fn log(&self, name: &str, pid: u32, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
         let string = String::from_utf8_lossy(bytes);
         for line in string.lines() {
-            println!("[{}:{}] {}", name, pid, line);
+            println!("[{} {}] {}", pid, name, line);
         }
         Ok(())
     }
 }
 
-
 pub struct NoopLogger;
 
 impl Logger for NoopLogger {
-    fn log(&self, _name: &str, _pid: i32, _bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    fn log(&self, _name: &str, _pid: u32, _bytes: &[u8]) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 }

@@ -22,3 +22,4 @@
 - [ ] improve logging:
     - [ ] log to file
     - [ ] log to syslog
+- [ ] create unique app name (for cgroups uniqueness)

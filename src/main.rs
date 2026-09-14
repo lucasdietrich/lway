@@ -1,15 +1,17 @@
-use std::sync::atomic;
+use std::{sync::atomic, thread::sleep};
 
 use libc::SIGINT;
 
-use crate::{parser::Config, runtime::App};
+use crate::{cgroups::init_main_cgroup, parser::Config, runtime::App};
 
+pub mod cgroups;
+pub mod config;
 pub mod logger;
 pub mod parser;
 pub mod pipe;
 pub mod runtime;
+pub mod support;
 pub mod utils;
-pub mod config;
 
 const CONFIG: &str = "apps.yaml";
 
@@ -17,17 +19,17 @@ pub struct Runtime {
     pub apps: Vec<App>,
 }
 
-const FLAG_INT_RECEIVED: usize = 1 << 0;
-static FLAGS: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+static SIGINT_COUNT: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
+const SIGINT_LIMIT: usize = 3;
 
 extern "C" fn handler(signal: i32) {
     println!("Received signal: {}", signal);
     if signal == SIGINT {
-        if FLAGS.fetch_or(FLAG_INT_RECEIVED, atomic::Ordering::SeqCst) & FLAG_INT_RECEIVED != 0 {
-            println!("Second SIGINT received, exiting immediately");
+        if SIGINT_COUNT.fetch_add(1, atomic::Ordering::SeqCst) >= (SIGINT_LIMIT - 1) {
+            println!("Received SIGINT {} times, exiting immediately", SIGINT_LIMIT);
             std::process::exit(1);
         } else {
-            println!("SIGINT received, sending SIGTERM to all child processes");
+            println!("SIGINT received {} times", SIGINT_COUNT.load(atomic::Ordering::SeqCst));
         }
     }
 }
@@ -37,6 +39,12 @@ impl Runtime {
         Runtime { apps: Vec::new() }
     }
 }
+
+// impl Drop for Runtime {
+//     fn drop(&mut self) {
+
+//     }
+// }
 
 fn main() {
     // Parse command-line arguments to determine verbosity level
@@ -73,7 +81,9 @@ fn main() {
     }
 
     let mut rt = Runtime::init();
-    let logger = logger::NoopLogger;
+    let logger = logger::StdoutLogger;
+
+    let main_cg = init_main_cgroup();
 
     for app_cfg in cfg.apps.iter() {
         log::info!("Starting {}", app_cfg.command);
@@ -98,31 +108,51 @@ fn main() {
             uid: app_cfg.uid,
             gid: app_cfg.gid,
             env,
+            cpu_weight: app_cfg.cpu_weight,
         };
 
         let app = App::start(params).expect("run_app");
         rt.apps.push(app);
     }
 
-    while FLAGS.load(atomic::Ordering::SeqCst) & FLAG_INT_RECEIVED == 0 {
+    loop {
         unsafe {
             libc::sleep(1);
+        }
+
+        // If Ctrl+C (SIGINT) was received
+        let sigint_count = SIGINT_COUNT.load(atomic::Ordering::SeqCst);
+        if sigint_count > 0 {
+            println!("SIGINT received {} times", sigint_count);
+            if sigint_count >= SIGINT_LIMIT - 1 {
+                // Send SIGKILL to all child processes
+                for app in rt.apps.iter() {
+                    if let Err(e) = app.terminate() {
+                        log::error!("Failed to send SIGKILL to {}: {}", app, e);
+                    }
+                }
+            } else {
+                // Send SIGTERM to all child processes
+                for app in rt.apps.iter() {
+                    if let Err(e) = app.sigterm() {
+                        log::error!("Failed to send SIGTERM to {}: {}", app, e);
+                    }
+                }
+            }
         }
 
         for app in rt.apps.iter_mut() {
             app.poll(&logger);
         }
 
-        if rt.apps.iter().all(|app| !app.is_running()) {
+        // Remove all apps that are no longer running
+        rt.apps.retain(|app| app.is_running());
+
+        if rt.apps.is_empty() {
             log::info!("all apps returned, exiting ...");
             break;
         }
     }
 
-    // Send SIGTERM to all child processes
-    for app in rt.apps.iter() {
-        if let Err(e) = app.sigterm() {
-            log::error!("Failed to send SIGTERM to {}: {}", app, e);
-        }
-    }
+    main_cg.delete().expect("Failed to delete main cgroup");
 }

@@ -10,6 +10,7 @@ pub struct AppConfig {
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub env: Option<HashMap<String, String>>,
+    pub cpu_weight: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
