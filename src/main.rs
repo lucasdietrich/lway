@@ -9,6 +9,7 @@ pub mod parser;
 pub mod pipe;
 pub mod runtime;
 pub mod utils;
+pub mod config;
 
 const CONFIG: &str = "apps.yaml";
 
@@ -72,7 +73,7 @@ fn main() {
     }
 
     let mut rt = Runtime::init();
-    let logger = logger::StdoutLogger;
+    let logger = logger::NoopLogger;
 
     for app_cfg in cfg.apps.iter() {
         log::info!("Starting {}", app_cfg.command);

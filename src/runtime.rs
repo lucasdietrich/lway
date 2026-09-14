@@ -169,7 +169,7 @@ impl App {
         }
     }
 
-    pub fn poll(&mut self, logger: &impl Logger) {
+    pub fn poll(&mut self, logger: &dyn Logger) {
         let State::Running(pid) = self.state else {
             return;
         };

@@ -3,6 +3,22 @@
 - [ ] Kill all OR get them back if exit lway
 - [ ] allow to add env vars
 - [ ] setsid
-- [ ] deamon support
 - [ ] cwd
 - [ ] user/group support
+- [ ] CLI:
+    - [ ] create workspace: https://claude.ai/chat/e6d0b828-962c-43c3-8804-592927e3ed5b
+    - [ ] cli: clap
+        - [ ] list apps
+        - [ ] start/stop/restart/status/stats
+        - [ ] cgroup control
+    - [ ] protocol: json + serde
+    - [ ] daemon
+- [ ] poll apps + IPC events
+- [ ] react to "reload" (SIGUP signal): https://claude.ai/chat/09d6152f-8b4e-49c5-bc10-5238c8e75899
+- [ ] yocto integration
+- [ ] add cgroup support
+- [ ] allow to parse per-app configuration file
+- [ ] add support for a global configuration file
+- [ ] improve logging:
+    - [ ] log to file
+    - [ ] log to syslog
