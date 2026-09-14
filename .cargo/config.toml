@@ -1,5 +1,5 @@
 [build]
-target = "thumbv7neon-unknown-linux-gnueabihf"
+target = "aarch64-unknown-linux-gnu"
 
 [target.thumbv7neon-unknown-linux-gnueabihf]
 
@@ -22,11 +22,34 @@ rustflags = [
 "-C", "link-arg=-Werror=format-security",
 "-C", "link-arg=-D_TIME_BITS=64",
 "-C", "link-arg=-D_FILE_OFFSET_BITS=64",
-"-C", "link-arg=--sysroot=/opt/amy/1.0/sysroots/cortexa7t2hf-neon-vfpv4-poky-linux-gnueabi"
+"-C", "link-arg=--sysroot=/opt/amy/mp1-1.0/sysroots/cortexa7t2hf-neon-vfpv4-poky-linux-gnueabi"
 ]
 
 # linker = "/opt/poky/poky-5.0.9/sysroots/x86_64-pokysdk-linux/usr/bin/arm-poky-linux-gnueabi/arm-poky-linux-gnueabi-gcc"
-linker = "/opt/amy/1.0/sysroots/x86_64-pokysdk-linux/usr/bin/arm-poky-linux-gnueabi/arm-poky-linux-gnueabi-gcc"
+linker = "/opt/amy/mp1-1.0/sysroots/x86_64-pokysdk-linux/usr/bin/arm-poky-linux-gnueabi/arm-poky-linux-gnueabi-gcc"
+
+
+[target.aarch64-unknown-linux-gnu]
+
+runner = "bash scripts/run-qemu.sh"
+#runner = "bash scripts/run-probe-rs.sh"
+
+# When using Yocto SDK, the linker and flags can be obtained from the $CC environment variable
+# after sourcing the environment-setup script.
+rustflags = [
+
+"-C", "link-arg=-mcpu=cortex-a35+crc",
+"-C", "link-arg=-mbranch-protection=standard",
+"-C", "link-arg=-fstack-protector-strong",
+"-C", "link-arg=-O2",
+"-C", "link-arg=-D_FORTIFY_SOURCE=2",
+"-C", "link-arg=-Wformat",
+"-C", "link-arg=-Wformat-security",
+"-C", "link-arg=-Werror=format-security",
+"-C", "link-arg=--sysroot=/opt/amy/1.0/sysroots/cortexa35-poky-linux"
+]
+
+linker = "/opt/amy/1.0/sysroots/x86_64-pokysdk-linux/usr/bin/aarch64-poky-linux/aarch64-poky-linux-gcc"
 
 [env]
 

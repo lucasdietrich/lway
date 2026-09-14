@@ -1,8 +1,16 @@
 apps:
   - name: id-root
-    command: id
+    command: /usr/bin/id
+  - name: default-env
+    command: /usr/bin/env
+  - name: custom-env
+    command: /usr/bin/env
+    env:
+      MYVAR1: value1
+      MYVAR2: value2
+      MYVAR3:
   - name: id-user
-    command: id
+    command: /usr/bin/id
     uid: 1001
     gid: 1001
   - name: "app1"

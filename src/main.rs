@@ -9,6 +9,7 @@ pub mod parser;
 pub mod pipe;
 pub mod runtime;
 pub mod utils;
+pub mod config;
 
 const CONFIG: &str = "apps.yaml";
 
@@ -65,14 +66,14 @@ fn main() {
 
     log::info!("{:#?}", cfg);
 
-    let ret = unsafe { libc::signal(SIGINT, handler as libc::sighandler_t) };
+    let ret = unsafe { libc::signal(SIGINT, handler as *const () as libc::sighandler_t) };
     if ret == libc::SIG_ERR {
         log::error!("Failed to set signal handler");
         std::process::exit(1);
     }
 
     let mut rt = Runtime::init();
-    let logger = logger::StdoutLogger;
+    let logger = logger::NoopLogger;
 
     for app_cfg in cfg.apps.iter() {
         log::info!("Starting {}", app_cfg.command);
