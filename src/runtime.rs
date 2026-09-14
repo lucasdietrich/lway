@@ -124,10 +124,10 @@ impl App {
             .map_or(Ok(()), |app_runtime| app_runtime.sigterm())
     }
 
-    pub fn terminate(&self) -> io::Result<()> {
+    pub fn sigkill(&self) -> io::Result<()> {
         self.state
             .as_runtime()
-            .map_or(Ok(()), |app_runtime| app_runtime.terminate())
+            .map_or(Ok(()), |app_runtime| app_runtime.sigkill())
     }
 }
 
@@ -172,14 +172,6 @@ impl State {
 
     fn as_runtime(&self) -> Option<&AppRuntime> {
         if let State::Running(rt) = self {
-            Some(rt)
-        } else {
-            None
-        }
-    }
-
-    fn as_runtime_mut(&mut self) -> Option<&mut AppRuntime> {
-        if let State::Running(ref mut rt) = self {
             Some(rt)
         } else {
             None
@@ -390,7 +382,7 @@ impl AppRuntime {
         Ok(())
     }
 
-    pub fn terminate(&self) -> io::Result<()> {
+    pub fn sigkill(&self) -> io::Result<()> {
         let ret = unsafe { libc::kill(self.pid as pid_t, libc::SIGKILL) };
         log::info!("app {} kill -> {}", self.pid, ret);
         if let Err(err) = to_ioresult(ret) {

@@ -245,14 +245,14 @@ fn main() {
 
         // If Ctrl+C (SIGINT) was received
         if rt.sigint_count > SIGINT_LIMIT {
-            // Send SIGKILL to all child processes
+        log::info!("Sending SIGKILL to all child processes");
             for app in rt.apps.iter() {
-                if let Err(e) = app.terminate() {
+                if let Err(e) = app.sigkill() {
                     log::error!("Failed to send SIGKILL to {}: {}", app, e);
                 }
             }
         } else if rt.sigint_count > 0 {
-            // Send SIGTERM to all child processes
+            log::info!("Sending SIGTERM to all child processes");
             for app in rt.apps.iter() {
                 if let Err(e) = app.sigterm() {
                     log::error!("Failed to send SIGTERM to {}: {}", app, e);
