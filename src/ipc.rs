@@ -22,6 +22,9 @@ use crate::runtime::App;
 
 pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 
+/// Cap on concurrent control-socket connections; see `Server::bind`.
+pub const DEFAULT_MAX_CONNECTIONS: usize = 32;
+
 #[derive(Debug, Error)]
 pub enum IpcError {
     #[error("io error: {0}")]
@@ -66,16 +69,25 @@ impl Connection {
 
 /// Control-socket server, polled alongside app supervision from the daemon's
 /// main event loop.
+///
+/// Token allocation: `UNIX_LISTENER_TOKEN` and every other system source
+/// (signalfd, waker, ...) registered by the caller must use an *even*
+/// token. Connection tokens handed out by `next_token` are always *odd*.
+/// This makes the two spaces structurally disjoint -- no bookkeeping or
+/// reserved range to keep in sync, and no risk of a connection token
+/// eventually wrapping into a value a system source already uses.
 pub struct Server {
     listener: UnixListener,
     connections: HashMap<Token, Connection>,
     next_token_id: usize,
+    max_connections: usize,
 }
 
 impl Server {
     /// Binds the control socket, removing any stale socket file left behind by
-    /// an unclean previous shutdown, and registers it with `poll`.
-    pub fn bind(socket_path: &Path, poll: &Poll) -> Result<Self> {
+    /// an unclean previous shutdown, and registers it with `poll`. Once
+    /// `max_connections` are active, further connections are rejected.
+    pub fn bind(socket_path: &Path, poll: &Poll, max_connections: usize) -> Result<Self> {
         if socket_path.exists() {
             std::fs::remove_file(socket_path)?;
         }
@@ -87,17 +99,34 @@ impl Server {
         Ok(Server {
             listener,
             connections: HashMap::new(),
-            next_token_id: 1,
+            next_token_id: 0,
+            max_connections,
         })
     }
 
+    fn next_token(&mut self) -> Token {
+        let token = Token(self.next_token_id * 2 + 1);
+        self.next_token_id += 1;
+        token
+    }
+
     /// Accepts every pending connection until the listener would block.
+    /// Connections beyond `max_connections` get a best-effort error reply
+    /// and are dropped immediately instead of being tracked.
     pub fn accept_all(&mut self, poll: &Poll) -> Result<()> {
         loop {
             match self.listener.accept() {
                 Ok((mut stream, _addr)) => {
-                    let token = Token(self.next_token_id);
-                    self.next_token_id += 1;
+                    if self.connections.len() >= self.max_connections {
+                        log::warn!(
+                            "rejecting control connection: {} already active (max {})",
+                            self.connections.len(),
+                            self.max_connections
+                        );
+                        reject_over_capacity(&mut stream);
+                        continue;
+                    }
+                    let token = self.next_token();
                     poll.registry()
                         .register(&mut stream, token, Interest::READABLE)?;
                     self.connections.insert(token, Connection::new(stream));
@@ -217,6 +246,17 @@ impl Server {
         if let Some(mut conn) = self.connections.remove(&token) {
             let _ = poll.registry().deregister(&mut conn.stream);
         }
+    }
+}
+
+/// Single best-effort, non-blocking write; the stream is dropped right
+/// after regardless of whether the write succeeded.
+fn reject_over_capacity(stream: &mut UnixStream) {
+    if let Ok(mut line) = serde_json::to_string(&Response::Error {
+        message: "too many control connections, try again later".to_string(),
+    }) {
+        line.push('\n');
+        let _ = stream.write_all(line.as_bytes());
     }
 }
 

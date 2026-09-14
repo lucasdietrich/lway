@@ -40,10 +40,11 @@ deploy: build deploy-config
   scp {{exe}} {{target}}:~/
 
 app:
-  bear -- $CC apps/app.c -o apps/app 
-  scp apps/app {{target}}:~/
+  . ./.env && bear -- $CC apps/app.c -o apps/app
+  ssh {{target}} "mkdir -p /var/amy"
+  scp apps/app {{target}}:/var/amy/
 
 ctest: deploy-config
-  . ./.env && $CC apps/test.c -o apps/test
+  . ./.env && bear -- $CC apps/test.c -o apps/test
   ssh {{target}} "mkdir -p /var/amy"
   scp apps/test {{target}}:/var/amy/

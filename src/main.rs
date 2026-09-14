@@ -1,10 +1,9 @@
 use std::{io, path::PathBuf, sync::atomic, time::Duration};
 
 use clap::{Parser, Subcommand};
-use libc::SIGINT;
-use mio::{Events, Poll};
+use mio::{unix::SourceFd, Events, Poll, Token};
 
-use crate::{cgroups::init_main_cgroup, config::GlobalConfig, runtime::App};
+use crate::{cgroups::init_main_cgroup, config::GlobalConfig, runtime::App, support::signal::handle_signal_fd};
 
 pub mod cgroups;
 pub mod config;
@@ -20,6 +19,13 @@ const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 // world-writable /tmp is fine for local experimentation; a real deployment
 // running as root should keep this under /run.
 const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
+
+// Even: reserved/system token, disjoint from ipc::Server's odd connection
+// tokens -- see the doc comment on ipc::UNIX_LISTENER_TOKEN.
+const SIGNALFD_TOKEN: Token = Token(2);
+
+// Number of SIGINTs to tolerate before exiting
+const SIGINT_LIMIT: usize = 2;
 
 /// lway - a tiny process supervisor
 #[derive(Parser, Debug)]
@@ -54,25 +60,7 @@ enum Command {
 pub struct Runtime {
     apps: Vec<App>,
     stopping: bool,
-}
-
-static SIGINT_COUNT: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
-const SIGINT_LIMIT: usize = 3;
-
-extern "C" fn handler(signal: i32) {
-    println!("Received signal: {}", signal);
-    if signal == SIGINT {
-        let sigint_count = SIGINT_COUNT.fetch_add(1, atomic::Ordering::SeqCst);
-        if sigint_count >= (SIGINT_LIMIT - 1) {
-            println!(
-                "Received SIGINT {} times, exiting immediately",
-                sigint_count
-            );
-            std::process::exit(1);
-        } else {
-            println!("SIGINT received {} times", sigint_count);
-        }
-    }
+    sigint_count: usize,
 }
 
 impl Runtime {
@@ -80,6 +68,7 @@ impl Runtime {
         Runtime {
             apps: Vec::new(),
             stopping: false,
+            sigint_count: 0,
         }
     }
 }
@@ -132,11 +121,17 @@ fn main() {
     let apps = global_cfg.all_apps(&config_path);
     log::info!("{:#?}", apps);
 
-    let ret = unsafe { libc::signal(SIGINT, handler as *const () as libc::sighandler_t) };
-    if ret == libc::SIG_ERR {
-        log::error!("Failed to set signal handler");
-        std::process::exit(1);
-    }
+    // let siginfo = libc::sigset_t {}
+    // let ret = libc::signalfd(-1, mask, flags)
+
+    let signalfd = match support::signal::setup_signal_fd() {
+        Ok(fd) => fd,
+        Err(e) => {
+            log::error!("Failed to set up signal fd: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let mut signal_sourcefd = SourceFd(&signalfd);
 
     let mut rt = Runtime::init();
     let logger = logger::StdoutLogger;
@@ -178,15 +173,24 @@ fn main() {
     }
 
     let mut poll = Poll::new().expect("create mio poll");
-    let mut ipc_server = ipc::Server::bind(&socket_path, &poll).unwrap_or_else(|e| {
-        log::error!(
-            "Failed to bind control socket {}: {}",
-            socket_path.display(),
-            e
-        );
-        std::process::exit(1);
-    });
+    let mut ipc_server = ipc::Server::bind(&socket_path, &poll, ipc::DEFAULT_MAX_CONNECTIONS)
+        .unwrap_or_else(|e| {
+            log::error!(
+                "Failed to bind control socket {}: {}",
+                socket_path.display(),
+                e
+            );
+            std::process::exit(1);
+        });
     let mut events = Events::with_capacity(128);
+
+    poll.registry()
+        .register(
+            &mut signal_sourcefd,
+            SIGNALFD_TOKEN,
+            mio::Interest::READABLE,
+        )
+        .expect("register signal fd");
 
     loop {
         // Doubles as the supervisor's ~1s poll tick: app health/output is
@@ -199,6 +203,18 @@ fn main() {
 
         for event in events.iter() {
             let token = event.token();
+
+            if token == SIGNALFD_TOKEN {
+                match handle_signal_fd(&signalfd) {
+                    // Increment the SIGINT count and mark the runtime as stopping
+                    libc::SIGINT => {
+                        rt.sigint_count += 1;
+                        rt.stopping = true;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
 
             if token == ipc::UNIX_LISTENER_TOKEN {
                 if let Err(e) = ipc_server.accept_all(&poll) {
@@ -228,23 +244,18 @@ fn main() {
         }
 
         // If Ctrl+C (SIGINT) was received
-        let sigint_count = SIGINT_COUNT.load(atomic::Ordering::SeqCst);
-        if sigint_count > 0 {
-            println!("SIGINT received {} times", sigint_count);
-            rt.stopping = true;
-            if sigint_count >= SIGINT_LIMIT - 1 {
-                // Send SIGKILL to all child processes
-                for app in rt.apps.iter() {
-                    if let Err(e) = app.terminate() {
-                        log::error!("Failed to send SIGKILL to {}: {}", app, e);
-                    }
+        if rt.sigint_count > SIGINT_LIMIT {
+            // Send SIGKILL to all child processes
+            for app in rt.apps.iter() {
+                if let Err(e) = app.terminate() {
+                    log::error!("Failed to send SIGKILL to {}: {}", app, e);
                 }
-            } else {
-                // Send SIGTERM to all child processes
-                for app in rt.apps.iter() {
-                    if let Err(e) = app.sigterm() {
-                        log::error!("Failed to send SIGTERM to {}: {}", app, e);
-                    }
+            }
+        } else if rt.sigint_count > 0 {
+            // Send SIGTERM to all child processes
+            for app in rt.apps.iter() {
+                if let Err(e) = app.sigterm() {
+                    log::error!("Failed to send SIGTERM to {}: {}", app, e);
                 }
             }
         }
