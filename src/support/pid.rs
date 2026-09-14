@@ -1,0 +1,1 @@
+pub struct Pid(libc::pid_t);

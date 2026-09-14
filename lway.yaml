@@ -2,6 +2,7 @@ apps_dir: .
 apps:
   - name: id-root
     command: /usr/bin/id
+    oneshot: true
   - name: test1
     command: /var/amy/test -M 100
     cpu_weight: 100
@@ -11,6 +12,7 @@ apps:
   - name: test3
     command: /var/amy/test -M 100
     cpu_weight: 5
+    io_weight: 100
     user: www
     group: www
     workdir: /tmp

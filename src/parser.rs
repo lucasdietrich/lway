@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::support::uidgid::{get_gid, get_uid};
+use crate::{cgroups::AppCgroupConfig, support::uidgid::{get_gid, get_uid}};
 
 /// A user/group given either by numeric id or by name.
 #[derive(Debug, Deserialize)]
@@ -20,7 +20,10 @@ pub struct AppConfig {
     pub user: Option<UserId>,
     pub group: Option<UserId>,
     pub env: Option<HashMap<String, String>>,
-    pub cpu_weight: Option<u64>,
+    #[serde(default)]
+    pub oneshot: bool,
+    #[serde(flatten)]
+    pub cgroup: AppCgroupConfig,
 }
 
 impl AppConfig {
@@ -78,10 +81,20 @@ workdir: workdir
 command: "hello"
 user: root
 group: root
+cpu_weight: 100
+io_weight: 100
+memory_hard_limit: 1073741824
+memory_soft_limit: 0
+memory_swap_limit: 268435456
 "#;
         let cfg: AppConfig = serde_yaml::from_str(yaml)?;
         assert_eq!(cfg.resolved_uid(), Some(0));
         assert_eq!(cfg.resolved_gid(), Some(0));
+        assert_eq!(cfg.cgroup.cpu_weight, Some(100));
+        assert_eq!(cfg.cgroup.io_weight, Some(100));
+        assert_eq!(cfg.cgroup.memory_hard_limit, Some(1073741824));
+        assert_eq!(cfg.cgroup.memory_soft_limit, Some(0));
+        assert_eq!(cfg.cgroup.memory_swap_limit, Some(268435456));
 
         Ok(())
     }

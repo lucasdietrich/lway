@@ -132,7 +132,8 @@ fn main() {
             uid,
             gid,
             env,
-            cpu_weight: app_cfg.cpu_weight,
+            oneshot: app_cfg.oneshot,
+            cgroup: app_cfg.cgroup,
         };
 
         let app = App::start(params).expect("run_app");

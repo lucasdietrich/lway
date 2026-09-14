@@ -61,13 +61,14 @@ impl Pipe {
         Ok(Pipe(pipefd))
     }
 
+    /// Convert the pipe into a read-only file descriptor, closing the write end.
     pub fn into_read_fd(self) -> io::Result<PipeReader> {
-        // Close write end
         let ret = unsafe { libc::close(self.0[1]) };
         to_ioresult(ret)?;
         Ok(PipeReader(unsafe { OwnedFd::from_raw_fd(self.0[0]) }))
     }
 
+    /// Convert the pipe into a non-blocking read-only file descriptor, closing the write end.
     pub fn into_nonblocking_read_fd(self) -> io::Result<PipeReader> {
         let reader = self.into_read_fd()?;
 
@@ -79,6 +80,7 @@ impl Pipe {
         Ok(reader)
     }
 
+    /// Convert the pipe into a write-only file descriptor, closing the read end.
     pub fn into_write_fd(self) -> io::Result<PipeWriter> {
         // Close read end
         let ret = unsafe { libc::close(self.0[0]) };

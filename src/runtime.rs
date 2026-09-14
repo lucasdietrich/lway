@@ -14,11 +14,7 @@ use libc::{
 use thiserror::Error;
 
 use crate::{
-    cgroups::init_app_cgroup,
-    logger::Logger,
-    pipe::{Pipe, PipeReader},
-    support::signal::signal_name,
-    utils::to_ioresult,
+    cgroups::{AppCgroupConfig, init_app_cgroup}, logger::Logger, pipe::{Pipe, PipeReader}, support::signal::signal_name, utils::to_ioresult,
 };
 
 #[derive(Debug, Error)]
@@ -26,6 +22,97 @@ pub enum AppErr {
     #[error("Runtime error: {0}")]
     Runtime(#[from] AppRuntimeError),
 }
+
+// remake <'a>
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppParams {
+    pub cwd: Option<String>,
+    pub name: String,
+    pub prog: String,
+    pub args: Vec<String>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub env: Vec<String>,
+    pub oneshot: bool,
+    pub cgroup: AppCgroupConfig,
+}
+
+pub struct App {
+    name: String,
+    params: AppParams,
+    state: State,
+}
+
+impl Drop for AppRuntime {
+    fn drop(&mut self) {
+        // pipe fds are automatically closed
+
+        if let Err(err) = self.cgroup.delete() {
+            log::error!("Failed to delete app cgroup: {}", err);
+        }
+    }
+}
+
+impl App {
+    pub fn start(params: AppParams) -> Result<Self, AppErr> {
+        let runtime = AppRuntime::new(&params)?;
+            
+        Ok(App {
+            name: params.name.to_string(),
+            state: State::Running(runtime),
+            params,
+        })
+    }
+
+    pub fn restart(&mut self) -> Result<(), AppErr> {
+        if let State::Terminated(_) = self.state {
+            let runtime = AppRuntime::new(&self.params)?;
+            self.state = State::Running(runtime);
+        }
+        Ok(())
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn poll(&mut self, logger: &dyn Logger, try_restart: bool) {
+        // trick: `State::poll` consumes `self`, so swap in a placeholder to move the real
+        // state out of the `&mut self` reference.
+        let placeholder = State::Terminated(ReturnState::Abnormal);
+        self.state = std::mem::replace(&mut self.state, placeholder).poll(&self.name, logger);
+
+        // TODO evaluate the restart of the application
+        if try_restart && !self.params.oneshot {
+            if let Err(err) = self.restart() {
+                log::error!("Failed to restart app {}: {}", self.name, err);
+            }
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.state.is_running()
+    }
+
+    pub fn sigterm(&self) -> io::Result<()> {
+        self.state
+            .as_runtime()
+            .map_or(Ok(()), |app_runtime| app_runtime.sigterm())
+    }
+
+    pub fn terminate(&self) -> io::Result<()> {
+        self.state
+            .as_runtime()
+            .map_or(Ok(()), |app_runtime| app_runtime.terminate())
+    }
+}
+
+impl Display for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "App {{ name: {}, state: {:?} }}", self.name, self.state)
+    }
+}
+
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnState {
@@ -50,12 +137,6 @@ struct AppRuntime {
     stdout: PipeReader,
     stderr: PipeReader,
     cgroup: Cgroup,
-}
-
-#[derive(Debug)]
-pub enum State {
-    Running(AppRuntime),
-    Terminated(ReturnState),
 }
 
 impl State {
@@ -87,29 +168,16 @@ impl State {
     }
 }
 
-// remake <'a>
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppParams {
-    pub cwd: Option<String>,
-    pub name: String,
-    pub prog: String,
-    pub args: Vec<String>,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
-    pub env: Vec<String>,
-    pub cpu_weight: Option<u64>,
-}
-
-pub struct App {
-    name: String,
-    params: AppParams,
-    state: State,
-}
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
     let ret = unsafe { dup2(src.as_raw_fd(), dst.as_raw_fd()) };
     to_ioresult(ret)?;
     Ok(())
+}
+#[derive(Debug)]
+pub enum State {
+    Running(AppRuntime),
+    Terminated(ReturnState),
 }
 
 impl AppRuntime {
@@ -207,7 +275,7 @@ impl AppRuntime {
             Err(AppRuntimeError::ExecvFailed(error))
         } else if ret > 0 {
             let pid = ret as u32;
-            let cgroup = init_app_cgroup(&params.name, pid, params.cpu_weight);
+            let cgroup = init_app_cgroup(&params.name, pid, &params.cgroup);
 
             // parent
             log::info!("Child pid: {}", ret);
@@ -308,75 +376,5 @@ impl AppRuntime {
         }
 
         Ok(())
-    }
-}
-
-impl Drop for AppRuntime {
-    fn drop(&mut self) {
-        // pipe fds are automatically closed
-
-        if let Err(err) = self.cgroup.delete() {
-            log::error!("Failed to delete app cgroup: {}", err);
-        }
-    }
-}
-
-impl App {
-    pub fn start(params: AppParams) -> Result<Self, AppErr> {
-        let runtime = AppRuntime::new(&params)?;
-            
-        Ok(App {
-            name: params.name.to_string(),
-            state: State::Running(runtime),
-            params,
-        })
-    }
-
-    pub fn restart(&mut self) -> Result<(), AppErr> {
-        if let State::Terminated(_) = self.state {
-            let runtime = AppRuntime::new(&self.params)?;
-            self.state = State::Running(runtime);
-        }
-        Ok(())
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn poll(&mut self, logger: &dyn Logger, try_restart: bool) {
-        // trick: `State::poll` consumes `self`, so swap in a placeholder to move the real
-        // state out of the `&mut self` reference.
-        let placeholder = State::Terminated(ReturnState::Abnormal);
-        self.state = std::mem::replace(&mut self.state, placeholder).poll(&self.name, logger);
-
-        // TODO evaluate the restart of the application
-        if try_restart {
-            if let Err(err) = self.restart() {
-                log::error!("Failed to restart app {}: {}", self.name, err);
-            }
-        }
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.state.is_running()
-    }
-
-    pub fn sigterm(&self) -> io::Result<()> {
-        self.state
-            .as_runtime()
-            .map_or(Ok(()), |app_runtime| app_runtime.sigterm())
-    }
-
-    pub fn terminate(&self) -> io::Result<()> {
-        self.state
-            .as_runtime()
-            .map_or(Ok(()), |app_runtime| app_runtime.terminate())
-    }
-}
-
-impl Display for App {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "App {{ name: {}, state: {:?} }}", self.name, self.state)
     }
 }

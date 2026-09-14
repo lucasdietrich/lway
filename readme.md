@@ -1,7 +1,7 @@
 # TODOs
 
 - [ ] Kill all OR get them back if exit lway
-- [ ] allow to add env vars
+- [x] allow to add env vars
 - [ ] setsid
 - [ ] cwd
 - [ ] user/group support
@@ -16,13 +16,13 @@
 - [ ] poll apps + IPC events
 - [ ] react to "reload" (SIGUP signal): https://claude.ai/chat/09d6152f-8b4e-49c5-bc10-5238c8e75899
 - [ ] yocto integration
-- [ ] add cgroup support
-- [ ] allow to parse per-app configuration file
-- [ ] add support for a global configuration file
+- [x] add cgroup support
+- [x] allow to parse per-app configuration file
+- [x] add support for a global configuration file
 - [ ] improve logging:
     - [ ] log to file
     - [ ] log to syslog
 - [ ] create unique app name (for cgroups uniqueness)
-- [ ] automatically restart a service which crashes or exits unexpectedly
-- [ ] oneshot mode for apps (don't restart them if they exit successfully)
+- [x] automatically restart a service which crashes or exits unexpectedly
+- [x] oneshot mode for apps (don't restart them if they exit successfully)
 - [ ] setsid (create a new session leader for each app)
