@@ -1,19 +1,25 @@
-use std::{path::PathBuf, sync::atomic};
+use std::{io, path::PathBuf, sync::atomic, time::Duration};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use libc::SIGINT;
+use mio::{Events, Poll};
 
 use crate::{cgroups::init_main_cgroup, config::GlobalConfig, runtime::App};
 
 pub mod cgroups;
 pub mod config;
+pub mod ipc;
 pub mod logger;
 pub mod parser;
 pub mod pipe;
+pub mod protocol;
 pub mod runtime;
 pub mod support;
 
 const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
+// world-writable /tmp is fine for local experimentation; a real deployment
+// running as root should keep this under /run.
+const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
 
 /// lway - a tiny process supervisor
 #[derive(Parser, Debug)]
@@ -26,6 +32,23 @@ struct Cli {
     /// Path to the global configuration file
     #[arg(short = 'c', long = "config")]
     config: Option<PathBuf>,
+
+    /// Path to the daemon's control socket
+    #[arg(long = "socket")]
+    socket: Option<PathBuf>,
+
+    /// Run as the background supervisor instead of a CLI client
+    #[arg(long = "daemon")]
+    daemon: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// List apps supervised by the running daemon
+    List,
 }
 
 pub struct Runtime {
@@ -63,6 +86,22 @@ impl Runtime {
 
 fn main() {
     let cli = Cli::parse();
+
+    let socket_path = cli
+        .socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
+
+    if !cli.daemon {
+        let command = cli.command.unwrap_or_else(|| {
+            eprintln!("no command given, use --help");
+            std::process::exit(1);
+        });
+        match command {
+            Command::List => run_list_client(&socket_path),
+        }
+        return;
+    }
 
     let log_level = match cli.verbose {
         0 => log::LevelFilter::Off,
@@ -138,9 +177,54 @@ fn main() {
         rt.apps.push(app);
     }
 
+    let mut poll = Poll::new().expect("create mio poll");
+    let mut ipc_server = ipc::Server::bind(&socket_path, &poll).unwrap_or_else(|e| {
+        log::error!(
+            "Failed to bind control socket {}: {}",
+            socket_path.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+    let mut events = Events::with_capacity(128);
+
     loop {
-        unsafe {
-            libc::sleep(1);
+        // Doubles as the supervisor's ~1s poll tick: app health/output is
+        // checked once per iteration below regardless of what woke us up.
+        if let Err(e) = poll.poll(&mut events, Some(Duration::from_secs(1))) {
+            if e.kind() != io::ErrorKind::Interrupted {
+                log::error!("control socket poll error: {}", e);
+            }
+        }
+
+        for event in events.iter() {
+            let token = event.token();
+
+            if token == ipc::UNIX_LISTENER_TOKEN {
+                if let Err(e) = ipc_server.accept_all(&poll) {
+                    log::error!("failed to accept control connection: {}", e);
+                }
+                continue;
+            }
+            if !ipc_server.is_known(token) {
+                continue;
+            }
+
+            if event.is_readable() {
+                if let Err(e) = ipc_server.handle_readable(token, &rt.apps) {
+                    log::error!("control connection read error: {}", e);
+                    ipc_server.close(token, &poll);
+                    continue;
+                }
+            }
+            if event.is_writable() {
+                if let Err(e) = ipc_server.handle_writable(token) {
+                    log::error!("control connection write error: {}", e);
+                    ipc_server.close(token, &poll);
+                    continue;
+                }
+            }
+            ipc_server.reconcile(token, &poll);
         }
 
         // If Ctrl+C (SIGINT) was received
@@ -175,5 +259,17 @@ fn main() {
         }
     }
 
+    let _ = std::fs::remove_file(&socket_path);
     main_cg.delete().expect("Failed to delete main cgroup");
+}
+
+/// Connects to a running daemon, requests the app list and prints it as a table.
+fn run_list_client(socket_path: &PathBuf) {
+    match ipc::list_apps(socket_path) {
+        Ok(apps) => ipc::print_apps_table(&apps),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

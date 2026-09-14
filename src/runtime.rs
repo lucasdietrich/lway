@@ -80,6 +80,26 @@ impl App {
         &self.name
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        self.state.as_runtime().map(|rt| rt.pid)
+    }
+
+    pub fn status_string(&self) -> String {
+        match &self.state {
+            State::Running(_) => "running".to_string(),
+            State::Terminated(ReturnState::Completed { ret }) => format!("exited({})", ret),
+            State::Terminated(ReturnState::Abnormal) => "abnormal".to_string(),
+        }
+    }
+
+    pub fn is_oneshot(&self) -> bool {
+        self.params.oneshot
+    }
+
+    pub fn cgroup_config(&self) -> &AppCgroupConfig {
+        &self.params.cgroup
+    }
+
     pub fn poll(&mut self, logger: &dyn Logger, try_restart: bool) {
         // trick: `State::poll` consumes `self`, so swap in a placeholder to move the real
         // state out of the `&mut self` reference.
