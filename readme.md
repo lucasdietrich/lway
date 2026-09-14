@@ -23,3 +23,6 @@
     - [ ] log to file
     - [ ] log to syslog
 - [ ] create unique app name (for cgroups uniqueness)
+- [ ] automatically restart a service which crashes or exits unexpectedly
+- [ ] oneshot mode for apps (don't restart them if they exit successfully)
+- [ ] setsid (create a new session leader for each app)

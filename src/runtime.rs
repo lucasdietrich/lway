@@ -8,12 +8,17 @@ use std::{
 
 use cgroups_rs::fs::Cgroup;
 use libc::{
-    STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG, WTERMSIG, c_char, dup2, pid_t, waitpid,
+    c_char, dup2, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
+    WIFSIGNALED, WNOHANG, WTERMSIG,
 };
 use thiserror::Error;
 
 use crate::{
-    cgroups::init_app_cgroup, logger::Logger, pipe::{Pipe, PipeReader}, support::signal::signal_name, utils::to_ioresult,
+    cgroups::init_app_cgroup,
+    logger::Logger,
+    pipe::{Pipe, PipeReader},
+    support::signal::signal_name,
+    utils::to_ioresult,
 };
 
 #[derive(Debug, Error)]

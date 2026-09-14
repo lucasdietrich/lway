@@ -7,8 +7,6 @@ use std::{
     },
 };
 
-use libc::pipe;
-
 use crate::utils::to_ioresult;
 
 pub struct PipeReader(OwnedFd);
@@ -55,7 +53,7 @@ pub struct Pipe([i32; 2]);
 impl Pipe {
     pub fn new() -> io::Result<Pipe> {
         let mut pipefd = [-1; 2];
-        let ret = unsafe { pipe(&mut pipefd as *mut c_int) };
+        let ret = unsafe { libc::pipe(&mut pipefd as *mut c_int) };
         to_ioresult(ret)?;
         Ok(Pipe(pipefd))
     }

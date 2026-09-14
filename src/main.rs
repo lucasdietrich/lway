@@ -1,8 +1,9 @@
-use std::{sync::atomic, thread::sleep};
+use std::{path::PathBuf, sync::atomic};
 
+use clap::Parser;
 use libc::SIGINT;
 
-use crate::{cgroups::init_main_cgroup, parser::Config, runtime::App};
+use crate::{cgroups::init_main_cgroup, config::GlobalConfig, runtime::App};
 
 pub mod cgroups;
 pub mod config;
@@ -13,7 +14,20 @@ pub mod runtime;
 pub mod support;
 pub mod utils;
 
-const CONFIG: &str = "apps.yaml";
+const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
+
+/// lway - a tiny process supervisor
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Cli {
+    /// Increase verbosity (repeat for more, e.g. -vvv)
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
+
+    /// Path to the global configuration file
+    #[arg(short = 'c', long = "config")]
+    config: Option<PathBuf>,
+}
 
 pub struct Runtime {
     pub apps: Vec<App>,
@@ -25,11 +39,15 @@ const SIGINT_LIMIT: usize = 3;
 extern "C" fn handler(signal: i32) {
     println!("Received signal: {}", signal);
     if signal == SIGINT {
-        if SIGINT_COUNT.fetch_add(1, atomic::Ordering::SeqCst) >= (SIGINT_LIMIT - 1) {
-            println!("Received SIGINT {} times, exiting immediately", SIGINT_LIMIT);
+        let sigint_count = SIGINT_COUNT.fetch_add(1, atomic::Ordering::SeqCst);
+        if sigint_count >= (SIGINT_LIMIT - 1) {
+            println!(
+                "Received SIGINT {} times, exiting immediately",
+                sigint_count
+            );
             std::process::exit(1);
         } else {
-            println!("SIGINT received {} times", SIGINT_COUNT.load(atomic::Ordering::SeqCst));
+            println!("SIGINT received {} times", sigint_count);
         }
     }
 }
@@ -40,22 +58,10 @@ impl Runtime {
     }
 }
 
-// impl Drop for Runtime {
-//     fn drop(&mut self) {
-
-//     }
-// }
-
 fn main() {
-    // Parse command-line arguments to determine verbosity level
-    let args: Vec<String> = std::env::args().collect();
-    let verbosity = args
-        .iter()
-        .filter(|arg| arg.starts_with("-v"))
-        .map(|arg| arg.chars().filter(|&c| c == 'v').count())
-        .sum::<usize>();
+    let cli = Cli::parse();
 
-    let log_level = match verbosity {
+    let log_level = match cli.verbose {
         0 => log::LevelFilter::Off,
         1 => log::LevelFilter::Error,
         2 => log::LevelFilter::Warn,
@@ -69,10 +75,16 @@ fn main() {
         .init()
         .expect("init logger");
 
-    let yaml = std::fs::read_to_string(CONFIG).expect("read config file");
-    let cfg: Config = serde_yaml::from_str(&yaml).expect("parse config");
+    let config_path = cli
+        .config
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+    let global_cfg = GlobalConfig::load(&config_path).unwrap_or_else(|e| {
+        log::warn!("Failed to load global config {}: {}", config_path.display(), e);
+        GlobalConfig::default()
+    });
 
-    log::info!("{:#?}", cfg);
+    let apps = global_cfg.all_apps(&config_path);
+    log::info!("{:#?}", apps);
 
     let ret = unsafe { libc::signal(SIGINT, handler as *const () as libc::sighandler_t) };
     if ret == libc::SIG_ERR {
@@ -85,7 +97,7 @@ fn main() {
 
     let main_cg = init_main_cgroup();
 
-    for app_cfg in cfg.apps.iter() {
+    for app_cfg in apps.iter() {
         log::info!("Starting {}", app_cfg.command);
         let parts: Vec<&str> = app_cfg.command.split(' ').collect();
         let name = app_cfg.name.as_deref().unwrap_or(parts[0]);
@@ -116,10 +128,6 @@ fn main() {
     }
 
     loop {
-        unsafe {
-            libc::sleep(1);
-        }
-
         // If Ctrl+C (SIGINT) was received
         let sigint_count = SIGINT_COUNT.load(atomic::Ordering::SeqCst);
         if sigint_count > 0 {
@@ -151,6 +159,10 @@ fn main() {
         if rt.apps.is_empty() {
             log::info!("all apps returned, exiting ...");
             break;
+        }
+
+        unsafe {
+            libc::sleep(1);
         }
     }
 

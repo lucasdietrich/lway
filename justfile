@@ -34,7 +34,7 @@ example EXAMPLE='pipe':
 
 target := "mpx.usb"
 deploy-config:
-  scp apps.yaml {{target}}:~/
+  scp lway.yaml {{target}}:~/
 
 deploy: build deploy-config
   scp {{exe}} {{target}}:~/

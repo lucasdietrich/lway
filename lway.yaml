@@ -1,3 +1,4 @@
+apps_dir: .
 apps:
   - name: id-root
     command: /usr/bin/id

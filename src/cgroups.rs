@@ -1,5 +1,5 @@
-use cgroups_rs::{CgroupPid, fs::*};
 use cgroups_rs::fs::cgroup_builder::*;
+use cgroups_rs::{fs::*, CgroupPid};
 
 const LWAY_CGROUP_NAME: &str = "lway";
 const LWAY_MEMORY_HARD_LIMIT: i64 = 1024 * 1024 * 1024; // 500 MiB
@@ -15,7 +15,7 @@ pub fn init_main_cgroup() -> Cgroup {
         .shares(DEFAULT_CPU_WEIGHT)
         .done()
         .memory()
-        .memory_hard_limit(LWAY_MEMORY_HARD_LIMIT) 
+        .memory_hard_limit(LWAY_MEMORY_HARD_LIMIT)
         .memory_soft_limit(LWAY_MEMORY_SOFT_LIMIT)
         .memory_swap_limit(LWAY_MEMORY_SWAP_LIMIT)
         .done()
