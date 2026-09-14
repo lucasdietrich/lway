@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use crate::utils::to_ioresult;
+use crate::support::to_ioresult;
 
 #[derive(Debug)]
 pub struct PipeReader(OwnedFd);

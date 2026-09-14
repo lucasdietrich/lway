@@ -12,7 +12,6 @@ pub mod parser;
 pub mod pipe;
 pub mod runtime;
 pub mod support;
-pub mod utils;
 
 const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 
@@ -28,7 +27,6 @@ struct Cli {
     #[arg(short = 'c', long = "config")]
     config: Option<PathBuf>,
 }
-
 
 pub struct Runtime {
     apps: Vec<App>,

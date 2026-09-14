@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
-use crate::{cgroups::AppCgroupConfig, support::uidgid::{get_gid, get_uid}};
+use crate::{
+    cgroups::AppCgroupConfig,
+    support::uidgid::{get_gid, get_uid},
+};
 
 /// A user/group given either by numeric id or by name.
 #[derive(Debug, Deserialize)]

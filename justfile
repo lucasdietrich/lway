@@ -23,7 +23,7 @@ debug:
   cargo build
 
 test:
-  cargo test
+  cargo test --target x86_64-unknown-linux-gnu
 
 clean:
   cargo clean

@@ -11,9 +11,7 @@ const DEFAULT_CPU_WEIGHT: u64 = 100;
 const DEFAULT_IO_WEIGHT: u16 = 100;
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct MainCgroupConfig {
-
-}
+pub struct MainCgroupConfig {}
 
 pub fn init_main_cgroup() -> Cgroup {
     let hier = cgroups_rs::fs::hierarchies::auto();

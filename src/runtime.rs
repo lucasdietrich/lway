@@ -14,7 +14,11 @@ use libc::{
 use thiserror::Error;
 
 use crate::{
-    cgroups::{AppCgroupConfig, init_app_cgroup}, logger::Logger, pipe::{Pipe, PipeReader}, support::signal::signal_name, utils::to_ioresult,
+    cgroups::{init_app_cgroup, AppCgroupConfig},
+    logger::Logger,
+    pipe::{Pipe, PipeReader},
+    support::signal::signal_name,
+    support::to_ioresult,
 };
 
 #[derive(Debug, Error)]
@@ -56,7 +60,7 @@ impl Drop for AppRuntime {
 impl App {
     pub fn start(params: AppParams) -> Result<Self, AppErr> {
         let runtime = AppRuntime::new(&params)?;
-            
+
         Ok(App {
             name: params.name.to_string(),
             state: State::Running(runtime),
@@ -113,7 +117,6 @@ impl Display for App {
     }
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReturnState {
     // Tell whether the process returned normally
@@ -167,7 +170,6 @@ impl State {
         matches!(self, State::Running(_))
     }
 }
-
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
     let ret = unsafe { dup2(src.as_raw_fd(), dst.as_raw_fd()) };
@@ -279,7 +281,7 @@ impl AppRuntime {
 
             // parent
             log::info!("Child pid: {}", ret);
-            
+
             Ok(AppRuntime {
                 pid,
                 stdout: pipe_stdout
