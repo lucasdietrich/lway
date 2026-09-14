@@ -1,14 +1,10 @@
 use std::{
-    ffi::CString,
-    fmt::Display,
-    io::{self, Error, Read},
-    os::fd::AsRawFd,
-    str::FromStr,
+    ffi::{CString, c_int}, fmt::Display, io::{self, Error, Read}, os::fd::{AsRawFd, RawFd}, str::FromStr,
 };
 
 use cgroups_rs::fs::Cgroup;
 use libc::{
-    c_char, dup2, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
+    c_char, dup2, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
     WIFSIGNALED, WNOHANG, WTERMSIG,
 };
 use thiserror::Error;
@@ -81,7 +77,7 @@ impl App {
     }
 
     pub fn pid(&self) -> Option<u32> {
-        self.state.as_runtime().map(|rt| rt.pid)
+        self.state.as_runtime().map(|rt| rt.pid as u32)
     }
 
     pub fn status_string(&self) -> String {
@@ -156,10 +152,11 @@ pub enum AppRuntimeError {
 
 #[derive(Debug)]
 struct AppRuntime {
-    pid: u32,
+    pid: libc::pid_t,
+    cgroup: Cgroup,
     stdout: PipeReader,
     stderr: PipeReader,
-    cgroup: Cgroup,
+    pidfd: RawFd,
 }
 
 impl State {
@@ -288,21 +285,28 @@ impl AppRuntime {
             log::error!("execv returned {} errno: {}", ret, error,);
             Err(AppRuntimeError::ExecvFailed(error))
         } else if ret > 0 {
-            let pid = ret as u32;
+            let pid = ret as libc::pid_t;
             let cgroup = init_app_cgroup(&params.name, pid, &params.cgroup);
+
+            let ret = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, libc::PIDFD_NONBLOCK) } as c_int;
+            let pidfd = to_ioresult(ret).map_err(|e| {
+                log::error!("pidfd_open failed: {}", e);
+                AppRuntimeError::Io(e)
+            })?;
 
             // parent
             log::info!("Child pid: {}", ret);
 
             Ok(AppRuntime {
                 pid,
+                cgroup,
                 stdout: pipe_stdout
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stdout"),
                 stderr: pipe_stderr
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stderr"),
-                cgroup,
+                pidfd,
             })
         } else {
             Err(AppRuntimeError::ForkFailed(ret))
@@ -340,10 +344,10 @@ impl AppRuntime {
         // Poll state
         let mut status: i32 = 0;
         let options: i32 = WNOHANG;
-        let ret = unsafe { waitpid(self.pid as pid_t, &mut status, options) };
+        let ret = unsafe { waitpid(self.pid as libc::pid_t, &mut status, options) };
         log::debug!("app: {} waitpid -> {} status: {}", self.pid, ret, status);
 
-        if ret == self.pid as pid_t {
+        if ret == self.pid as libc::pid_t {
             // children exited
 
             let signaled = WIFSIGNALED(status);
@@ -376,14 +380,14 @@ impl AppRuntime {
     }
 
     pub fn sigterm(&self) -> io::Result<()> {
-        let ret = unsafe { libc::kill(self.pid as pid_t, libc::SIGTERM) };
+        let ret = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) };
         log::info!("app {} kill -> {}", self.pid, ret);
         to_ioresult(ret)?;
         Ok(())
     }
 
     pub fn sigkill(&self) -> io::Result<()> {
-        let ret = unsafe { libc::kill(self.pid as pid_t, libc::SIGKILL) };
+        let ret = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
         log::info!("app {} kill -> {}", self.pid, ret);
         if let Err(err) = to_ioresult(ret) {
             log::error!("Failed to send SIGKILL to app {}: {}", self.pid, err);

@@ -18,6 +18,7 @@ log = "0.4.29"
 simple_logger = "5.1.0"
 cgroups-rs = "0.5.1"
 mio = { version = "0.8", features = ["os-poll", "net", "os-ext"] }
+slab = "0.4.12"
 
 [dev-dependencies]
 

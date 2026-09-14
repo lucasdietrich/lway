@@ -1,1 +1,1 @@
-pub struct Pid(libc::pid_t);
+pub struct Pid(pub libc::pid_t);

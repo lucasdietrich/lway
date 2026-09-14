@@ -1,9 +1,9 @@
-use std::{io, path::PathBuf, sync::atomic, time::Duration};
+use std::{io, path::PathBuf, time::Duration};
 
 use clap::{Parser, Subcommand};
 use mio::{unix::SourceFd, Events, Poll, Token};
 
-use crate::{cgroups::init_main_cgroup, config::GlobalConfig, runtime::App, support::signal::handle_signal_fd};
+use crate::{cgroups::init_main_cgroup, config::GlobalConfig, mio_token_slab::MioTokenSlab, runtime::App, support::signal::handle_signal_fd};
 
 pub mod cgroups;
 pub mod config;
@@ -14,18 +14,21 @@ pub mod pipe;
 pub mod protocol;
 pub mod runtime;
 pub mod support;
+pub mod mio_token_slab;
 
 const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 // world-writable /tmp is fine for local experimentation; a real deployment
 // running as root should keep this under /run.
 const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
 
-// Even: reserved/system token, disjoint from ipc::Server's odd connection
-// tokens -- see the doc comment on ipc::UNIX_LISTENER_TOKEN.
-const SIGNALFD_TOKEN: Token = Token(2);
-
 // Number of SIGINTs to tolerate before exiting
 const SIGINT_LIMIT: usize = 2;
+
+
+pub const UNIX_LISTENER_TOKEN: Token = Token(0);
+pub const SIGNALFD_TOKEN: Token = Token(1);
+pub const MAX_MIO_TOKENS: usize = 128;
+pub const RESERVED_MIO_TOKENS: usize = 2;
 
 /// lway - a tiny process supervisor
 #[derive(Parser, Debug)]
@@ -61,6 +64,7 @@ pub struct Runtime {
     apps: Vec<App>,
     stopping: bool,
     sigint_count: usize,
+    mio_token_slab: MioTokenSlab,
 }
 
 impl Runtime {
@@ -69,6 +73,7 @@ impl Runtime {
             apps: Vec::new(),
             stopping: false,
             sigint_count: 0,
+            mio_token_slab: MioTokenSlab::new(MAX_MIO_TOKENS, RESERVED_MIO_TOKENS),
         }
     }
 }
@@ -216,8 +221,8 @@ fn main() {
                 continue;
             }
 
-            if token == ipc::UNIX_LISTENER_TOKEN {
-                if let Err(e) = ipc_server.accept_all(&poll) {
+            if token == UNIX_LISTENER_TOKEN {
+                if let Err(e) = ipc_server.accept_all(&poll, &mut rt.mio_token_slab) {
                     log::error!("failed to accept control connection: {}", e);
                 }
                 continue;
@@ -229,18 +234,18 @@ fn main() {
             if event.is_readable() {
                 if let Err(e) = ipc_server.handle_readable(token, &rt.apps) {
                     log::error!("control connection read error: {}", e);
-                    ipc_server.close(token, &poll);
+                    ipc_server.close(token, &poll, &mut rt.mio_token_slab);
                     continue;
                 }
             }
             if event.is_writable() {
                 if let Err(e) = ipc_server.handle_writable(token) {
                     log::error!("control connection write error: {}", e);
-                    ipc_server.close(token, &poll);
+                    ipc_server.close(token, &poll, &mut rt.mio_token_slab);
                     continue;
                 }
             }
-            ipc_server.reconcile(token, &poll);
+            ipc_server.reconcile(token, &poll, &mut rt.mio_token_slab);
         }
 
         // If Ctrl+C (SIGINT) was received

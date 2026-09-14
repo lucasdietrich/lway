@@ -539,6 +539,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "simple_logger",
+ "slab",
  "thiserror 2.0.20",
 ]
 

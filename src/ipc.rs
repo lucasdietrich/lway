@@ -17,10 +17,10 @@ use mio::net::{UnixListener, UnixStream};
 use mio::{Interest, Poll, Token};
 use thiserror::Error;
 
+use crate::UNIX_LISTENER_TOKEN;
+use crate::mio_token_slab::MioTokenSlab;
 use crate::protocol::{AppInfo, Request, Response};
 use crate::runtime::App;
-
-pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 
 /// Cap on concurrent control-socket connections; see `Server::bind`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 32;
@@ -69,13 +69,6 @@ impl Connection {
 
 /// Control-socket server, polled alongside app supervision from the daemon's
 /// main event loop.
-///
-/// Token allocation: `UNIX_LISTENER_TOKEN` and every other system source
-/// (signalfd, waker, ...) registered by the caller must use an *even*
-/// token. Connection tokens handed out by `next_token` are always *odd*.
-/// This makes the two spaces structurally disjoint -- no bookkeeping or
-/// reserved range to keep in sync, and no risk of a connection token
-/// eventually wrapping into a value a system source already uses.
 pub struct Server {
     listener: UnixListener,
     connections: HashMap<Token, Connection>,
@@ -104,16 +97,10 @@ impl Server {
         })
     }
 
-    fn next_token(&mut self) -> Token {
-        let token = Token(self.next_token_id * 2 + 1);
-        self.next_token_id += 1;
-        token
-    }
-
     /// Accepts every pending connection until the listener would block.
     /// Connections beyond `max_connections` get a best-effort error reply
     /// and are dropped immediately instead of being tracked.
-    pub fn accept_all(&mut self, poll: &Poll) -> Result<()> {
+    pub fn accept_all(&mut self, poll: &Poll, token_slab: &mut MioTokenSlab) -> Result<()> {
         loop {
             match self.listener.accept() {
                 Ok((mut stream, _addr)) => {
@@ -126,10 +113,14 @@ impl Server {
                         reject_over_capacity(&mut stream);
                         continue;
                     }
-                    let token = self.next_token();
-                    poll.registry()
-                        .register(&mut stream, token, Interest::READABLE)?;
-                    self.connections.insert(token, Connection::new(stream));
+                    if let Some(token) = token_slab.alloc() {
+                        poll.registry()
+                            .register(&mut stream, token, Interest::READABLE)?;
+                        self.connections.insert(token, Connection::new(stream));
+                    } else {
+                        log::warn!("rejecting control connection: no available token");
+                        reject_over_capacity(&mut stream);
+                    }
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) => return Err(e.into()),
@@ -210,14 +201,14 @@ impl Server {
 
     /// Closes the connection once fully flushed, otherwise updates its
     /// registered interest depending on whether output is pending.
-    pub fn reconcile(&mut self, token: Token, poll: &Poll) {
+    pub fn reconcile(&mut self, token: Token, poll: &Poll, token_slab: &mut MioTokenSlab) {
         let should_close = match self.connections.get(&token) {
             Some(conn) => conn.close_after_flush && conn.write_buf.is_empty(),
             None => return,
         };
 
         if should_close {
-            self.close(token, poll);
+            self.close(token, poll, token_slab);
             return;
         }
 
@@ -242,9 +233,10 @@ impl Server {
         }
     }
 
-    pub fn close(&mut self, token: Token, poll: &Poll) {
+    pub fn close(&mut self, token: Token, poll: &Poll, token_slab: &mut MioTokenSlab) {
         if let Some(mut conn) = self.connections.remove(&token) {
             let _ = poll.registry().deregister(&mut conn.stream);
+            token_slab.free(token);
         }
     }
 }
