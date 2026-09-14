@@ -3,14 +3,19 @@ apps:
   - name: id-root
     command: /usr/bin/id
   - name: test1
-    command: ./test -M 100
+    command: /var/amy/test -M 100
     cpu_weight: 100
   - name: test2
-    command: ./test -M 100
+    command: /var/amy/test -M 100
     cpu_weight: 10
   - name: test3
-    command: ./test -M 100
+    command: /var/amy/test -M 100
     cpu_weight: 5
+    user: www
+    group: www
+    workdir: /tmp
+    env:
+      MYVAR1: value1
   # - name: default-env
   #   command: /usr/bin/env
   # - name: custom-env
@@ -21,7 +26,7 @@ apps:
   #     MYVAR3:
   # - name: id-user
   #   command: /usr/bin/id
-  #   uid: 1001
+  #   user: 1001
   #   gid: 1001
   # - name: "app1"
   #   command: "/home/root/app 10"

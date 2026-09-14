@@ -45,4 +45,5 @@ app:
 
 ctest: deploy-config
   . ./.env && $CC apps/test.c -o apps/test
-  scp apps/test {{target}}:~/
+  ssh {{target}} "mkdir -p /var/amy"
+  scp apps/test {{target}}:/var/amy/

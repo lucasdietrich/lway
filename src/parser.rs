@@ -2,15 +2,49 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::support::uidgid::{get_gid, get_uid};
+
+/// A user/group given either by numeric id or by name.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum UserId {
+    Id(u32),
+    Name(String),
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AppConfig {
     pub name: Option<String>,
     pub command: String,
     pub workdir: Option<String>,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
+    pub user: Option<UserId>,
+    pub group: Option<UserId>,
     pub env: Option<HashMap<String, String>>,
     pub cpu_weight: Option<u64>,
+}
+
+impl AppConfig {
+    pub fn resolved_uid(&self) -> Option<u32> {
+        match &self.user {
+            Some(UserId::Id(uid)) => Some(*uid),
+            Some(UserId::Name(name)) => get_uid(name).or_else(|| {
+                log::warn!("user '{}' not found", name);
+                None
+            }),
+            None => None,
+        }
+    }
+
+    pub fn resolved_gid(&self) -> Option<u32> {
+        match &self.group {
+            Some(UserId::Id(gid)) => Some(*gid),
+            Some(UserId::Name(name)) => get_gid(name).or_else(|| {
+                log::warn!("group '{}' not found", name);
+                None
+            }),
+            None => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +73,48 @@ workdir: workdir
     }
 
     #[test]
+    fn test_resolved_uid_gid_by_name() -> Result<(), Box<dyn std::error::Error>> {
+        let yaml = r#"
+command: "hello"
+user: root
+group: root
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(cfg.resolved_uid(), Some(0));
+        assert_eq!(cfg.resolved_gid(), Some(0));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolved_uid_gid_by_id() -> Result<(), Box<dyn std::error::Error>> {
+        let yaml = r#"
+command: "hello"
+user: 1234
+group: 5678
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(cfg.resolved_uid(), Some(1234));
+        assert_eq!(cfg.resolved_gid(), Some(5678));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolved_uid_gid_unknown_name() -> Result<(), Box<dyn std::error::Error>> {
+        let yaml = r#"
+command: "hello"
+user: does-not-exist
+group: does-not-exist
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(cfg.resolved_uid(), None);
+        assert_eq!(cfg.resolved_gid(), None);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_config() -> Result<(), Box<dyn std::error::Error>> {
         // Example YAML config
         let yaml = r#"
@@ -47,8 +123,8 @@ apps:
     workdir: /path/to/app1
   - command: "app2 -b"
     workdir: /path/to/app2
-    uid: 1000
-    gid: 1000
+    user: 1000
+    group: 1000
   - command: "app3"
     env:
       VAR1: value1
@@ -60,8 +136,8 @@ apps:
         assert_eq!(cfg.apps[0].workdir.as_deref(), Some("/path/to/app1"));
         assert_eq!(cfg.apps[1].command, "app2 -b");
         assert_eq!(cfg.apps[1].workdir.as_deref(), Some("/path/to/app2"));
-        assert_eq!(cfg.apps[1].uid, Some(1000));
-        assert_eq!(cfg.apps[1].gid, Some(1000));
+        assert_eq!(cfg.apps[1].resolved_uid(), Some(1000));
+        assert_eq!(cfg.apps[1].resolved_gid(), Some(1000));
         assert_eq!(cfg.apps[2].command, "app3");
         assert_eq!(
             cfg.apps[2]

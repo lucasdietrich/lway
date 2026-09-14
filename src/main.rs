@@ -29,8 +29,14 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
+enum State {
+    Running,
+    Stopping,
+}
+
 pub struct Runtime {
-    pub apps: Vec<App>,
+    apps: Vec<App>,
+    state: State,
 }
 
 static SIGINT_COUNT: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
@@ -54,7 +60,7 @@ extern "C" fn handler(signal: i32) {
 
 impl Runtime {
     pub fn init() -> Self {
-        Runtime { apps: Vec::new() }
+        Runtime { apps: Vec::new(), state: State::Running }
     }
 }
 
@@ -97,10 +103,13 @@ fn main() {
 
     let main_cg = init_main_cgroup();
 
-    for app_cfg in apps.iter() {
+    for app_cfg in apps.into_iter() {
+        let uid = app_cfg.resolved_uid();
+        let gid = app_cfg.resolved_gid();
+
         log::info!("Starting {}", app_cfg.command);
-        let parts: Vec<&str> = app_cfg.command.split(' ').collect();
-        let name = app_cfg.name.as_deref().unwrap_or(parts[0]);
+        let parts: Vec<String> = app_cfg.command.split(' ').map(|s| s.to_string()).collect();
+        let name = app_cfg.name.unwrap_or(parts[0].clone());
         let env: Vec<String> = app_cfg
             .env
             .as_ref()
@@ -113,12 +122,12 @@ fn main() {
             .unwrap_or_else(Vec::new);
 
         let params = runtime::AppParams {
-            cwd: app_cfg.workdir.as_deref(),
+            cwd: app_cfg.workdir,
             name,
-            prog: parts[0],
-            args: &parts,
-            uid: app_cfg.uid,
-            gid: app_cfg.gid,
+            prog: parts[0].clone(),
+            args: parts,
+            uid,
+            gid,
             env,
             cpu_weight: app_cfg.cpu_weight,
         };
@@ -128,10 +137,15 @@ fn main() {
     }
 
     loop {
+        unsafe {
+            libc::sleep(1);
+        }
+
         // If Ctrl+C (SIGINT) was received
         let sigint_count = SIGINT_COUNT.load(atomic::Ordering::SeqCst);
         if sigint_count > 0 {
             println!("SIGINT received {} times", sigint_count);
+            rt.state = State::Stopping;
             if sigint_count >= SIGINT_LIMIT - 1 {
                 // Send SIGKILL to all child processes
                 for app in rt.apps.iter() {
@@ -153,16 +167,30 @@ fn main() {
             app.poll(&logger);
         }
 
+        // Restart apps that have exited
+        if matches!(rt.state, State::Running) {
+            rt.apps = rt.apps.into_iter().filter_map(|app| {
+                if app.is_terminated() {
+                    log::info!("Restarting {}", app);
+                    match app.restart() {
+                        Ok(new_app) => Some(new_app),
+                        Err(e) => {
+                            log::error!("Failed to restart: {}", e);
+                            None
+                        }
+                    }
+                } else {
+                    Some(app)
+                }
+            }).collect::<Vec<App>>();
+        }
+
         // Remove all apps that are no longer running
         rt.apps.retain(|app| app.is_running());
 
         if rt.apps.is_empty() {
             log::info!("all apps returned, exiting ...");
             break;
-        }
-
-        unsafe {
-            libc::sleep(1);
         }
     }
 

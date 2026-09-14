@@ -1,5 +1,4 @@
 use std::ffi::CString;
-use std::ptr;
 
 pub fn get_uid(username: &str) -> Option<u32> {
     let c_username = CString::new(username).ok()?;

@@ -45,11 +45,11 @@ pub enum State {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppParams<'a> {
-    pub cwd: Option<&'a str>,
-    pub name: &'a str,
-    pub prog: &'a str,
-    pub args: &'a [&'a str],
+pub struct AppParams {
+    pub cwd: Option<String>,
+    pub name: String,
+    pub prog: String,
+    pub args: Vec<String>,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
     pub env: Vec<String>,
@@ -62,6 +62,7 @@ pub struct App {
     stdout: PipeReader,
     stderr: PipeReader,
     cgroup: Cgroup,
+    start_params: AppParams,
 }
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
@@ -71,7 +72,7 @@ fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
 }
 
 impl App {
-    pub fn start<'a>(params: AppParams<'a>) -> Result<Self, AppErr> {
+    pub fn start(params: AppParams) -> Result<Self, AppErr> {
         let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
 
@@ -85,7 +86,7 @@ impl App {
             let stderr = pipe_stderr.into_write_fd()?;
             fd_dup(stderr, STDERR_FILENO)?;
 
-            let prog = CString::from_str(params.prog).expect("app name");
+            let prog = CString::from_str(&params.prog).expect("app name");
             let args: Vec<CString> = params
                 .args
                 .iter()
@@ -113,6 +114,9 @@ impl App {
             //     log::error!("setgroups failed: {}", e);
             //     AppErr::Io(e)
             // })?;
+
+            // setgid must happen before setuid: once uid is dropped, permission to
+            // change gid is lost.
             if let Some(gid) = params.gid {
                 log::info!("Setting gid to {}", gid);
                 let ret = unsafe { libc::setgid(gid) };
@@ -121,6 +125,7 @@ impl App {
                     AppErr::Io(e)
                 })?;
             }
+
             if let Some(uid) = params.uid {
                 log::info!("Setting uid to {}", uid);
                 let ret = unsafe { libc::setuid(uid) };
@@ -143,7 +148,7 @@ impl App {
             envp.push(std::ptr::null());
 
             // Set working directory if specified
-            if let Some(cwd) = params.cwd {
+            if let Some(cwd) = &params.cwd {
                 log::info!("Changing working directory to {}", cwd);
                 let cwd_cstr = CString::from_str(cwd).expect("cwd");
                 let ret = unsafe { libc::chdir(cwd_cstr.as_ptr()) };
@@ -161,7 +166,7 @@ impl App {
             Err(AppErr::ExecvFailed(error))
         } else if ret > 0 {
             let pid = ret as u32;
-            let cgroup = init_app_cgroup(params.name, pid, params.cpu_weight);
+            let cgroup = init_app_cgroup(&params.name, pid, params.cpu_weight);
 
             // parent
             log::info!("Child pid: {}", ret);
@@ -175,6 +180,7 @@ impl App {
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stderr"),
                 cgroup,
+                start_params: params,
             })
         } else {
             Err(AppErr::ForkFailed(ret))
@@ -265,6 +271,10 @@ impl App {
         matches!(self.state, State::Running(_))
     }
 
+    pub fn is_terminated(&self) -> bool {
+        matches!(self.state, State::Terminated(_))
+    }
+
     pub fn sigterm(&self) -> io::Result<()> {
         let State::Running(pid) = self.state else {
             return Ok(());
@@ -280,12 +290,23 @@ impl App {
         if let State::Running(pid) = self.state {
             let ret = unsafe { libc::kill(pid as pid_t, libc::SIGKILL) };
             log::info!("app {} kill -> {}", pid, ret);
-            if let Ok(err) = to_ioresult(ret) {
+            if let Err(err) = to_ioresult(ret) {
                 log::error!("Failed to send SIGKILL to app {}: {}", pid, err);
             }
         }
 
         Ok(())
+    }
+
+    pub fn restart(self) -> Result<Self, AppErr> {
+        if let State::Terminated(_) = self.state {
+            let params = self.start_params.clone();
+            drop(self);
+            let app = App::start(params.clone())?;
+            Ok(app)
+        } else {
+            Ok(self)
+        }
     }
 }
 
