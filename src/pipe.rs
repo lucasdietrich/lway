@@ -9,7 +9,10 @@ use std::{
 
 use crate::utils::to_ioresult;
 
+#[derive(Debug)]
 pub struct PipeReader(OwnedFd);
+
+#[derive(Debug)]
 pub struct PipeWriter(OwnedFd);
 
 impl AsRawFd for PipeReader {

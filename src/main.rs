@@ -29,14 +29,10 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
-enum State {
-    Running,
-    Stopping,
-}
 
 pub struct Runtime {
     apps: Vec<App>,
-    state: State,
+    stopping: bool,
 }
 
 static SIGINT_COUNT: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
@@ -60,7 +56,10 @@ extern "C" fn handler(signal: i32) {
 
 impl Runtime {
     pub fn init() -> Self {
-        Runtime { apps: Vec::new(), state: State::Running }
+        Runtime {
+            apps: Vec::new(),
+            stopping: false,
+        }
     }
 }
 
@@ -85,7 +84,11 @@ fn main() {
         .config
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
     let global_cfg = GlobalConfig::load(&config_path).unwrap_or_else(|e| {
-        log::warn!("Failed to load global config {}: {}", config_path.display(), e);
+        log::warn!(
+            "Failed to load global config {}: {}",
+            config_path.display(),
+            e
+        );
         GlobalConfig::default()
     });
 
@@ -145,7 +148,7 @@ fn main() {
         let sigint_count = SIGINT_COUNT.load(atomic::Ordering::SeqCst);
         if sigint_count > 0 {
             println!("SIGINT received {} times", sigint_count);
-            rt.state = State::Stopping;
+            rt.stopping = true;
             if sigint_count >= SIGINT_LIMIT - 1 {
                 // Send SIGKILL to all child processes
                 for app in rt.apps.iter() {
@@ -164,31 +167,10 @@ fn main() {
         }
 
         for app in rt.apps.iter_mut() {
-            app.poll(&logger);
+            app.poll(&logger, !rt.stopping);
         }
 
-        // Restart apps that have exited
-        if matches!(rt.state, State::Running) {
-            rt.apps = rt.apps.into_iter().filter_map(|app| {
-                if app.is_terminated() {
-                    log::info!("Restarting {}", app);
-                    match app.restart() {
-                        Ok(new_app) => Some(new_app),
-                        Err(e) => {
-                            log::error!("Failed to restart: {}", e);
-                            None
-                        }
-                    }
-                } else {
-                    Some(app)
-                }
-            }).collect::<Vec<App>>();
-        }
-
-        // Remove all apps that are no longer running
-        rt.apps.retain(|app| app.is_running());
-
-        if rt.apps.is_empty() {
+        if rt.apps.iter().filter(|app| app.is_running()).count() == 0 {
             log::info!("all apps returned, exiting ...");
             break;
         }

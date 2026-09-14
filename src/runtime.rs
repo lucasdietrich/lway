@@ -23,12 +23,8 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum AppErr {
-    #[error("Fork failed {0}")]
-    ForkFailed(i32),
-    #[error("Execv failed {0}")]
-    ExecvFailed(Error),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("Runtime error: {0}")]
+    Runtime(#[from] AppRuntimeError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,12 +34,60 @@ pub enum ReturnState {
     Abnormal, // Tell whether the process returned normally (call to exit or return from main)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Error)]
+pub enum AppRuntimeError {
+    #[error("Fork failed {0}")]
+    ForkFailed(i32),
+    #[error("Execv failed {0}")]
+    ExecvFailed(Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Debug)]
+struct AppRuntime {
+    pid: u32,
+    stdout: PipeReader,
+    stderr: PipeReader,
+    cgroup: Cgroup,
+}
+
+#[derive(Debug)]
 pub enum State {
-    Running(u32), // Running with pid
+    Running(AppRuntime),
     Terminated(ReturnState),
 }
 
+impl State {
+    fn poll(self, app_name: &str, logger: &dyn Logger) -> Self {
+        match self {
+            State::Running(rt) => rt.poll(app_name, logger),
+            State::Terminated(_) => self,
+        }
+    }
+
+    fn as_runtime(&self) -> Option<&AppRuntime> {
+        if let State::Running(rt) = self {
+            Some(rt)
+        } else {
+            None
+        }
+    }
+
+    fn as_runtime_mut(&mut self) -> Option<&mut AppRuntime> {
+        if let State::Running(ref mut rt) = self {
+            Some(rt)
+        } else {
+            None
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        matches!(self, State::Running(_))
+    }
+}
+
+// remake <'a>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppParams {
     pub cwd: Option<String>,
@@ -58,11 +102,8 @@ pub struct AppParams {
 
 pub struct App {
     name: String,
+    params: AppParams,
     state: State,
-    stdout: PipeReader,
-    stderr: PipeReader,
-    cgroup: Cgroup,
-    start_params: AppParams,
 }
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
@@ -71,8 +112,8 @@ fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
-impl App {
-    pub fn start(params: AppParams) -> Result<Self, AppErr> {
+impl AppRuntime {
+    fn new(params: &AppParams) -> Result<Self, AppRuntimeError> {
         let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
 
@@ -122,7 +163,7 @@ impl App {
                 let ret = unsafe { libc::setgid(gid) };
                 to_ioresult(ret).map_err(|e| {
                     log::error!("setgid failed: {}", e);
-                    AppErr::Io(e)
+                    AppRuntimeError::Io(e)
                 })?;
             }
 
@@ -131,7 +172,7 @@ impl App {
                 let ret = unsafe { libc::setuid(uid) };
                 to_ioresult(ret).map_err(|e| {
                     log::error!("setuid failed: {}", e);
-                    AppErr::Io(e)
+                    AppRuntimeError::Io(e)
                 })?;
             }
 
@@ -154,7 +195,7 @@ impl App {
                 let ret = unsafe { libc::chdir(cwd_cstr.as_ptr()) };
                 to_ioresult(ret).map_err(|e| {
                     log::error!("chdir failed: {}", e);
-                    AppErr::Io(e)
+                    AppRuntimeError::Io(e)
                 })?;
             }
 
@@ -163,16 +204,16 @@ impl App {
             };
             let error = std::io::Error::last_os_error();
             log::error!("execv returned {} errno: {}", ret, error,);
-            Err(AppErr::ExecvFailed(error))
+            Err(AppRuntimeError::ExecvFailed(error))
         } else if ret > 0 {
             let pid = ret as u32;
             let cgroup = init_app_cgroup(&params.name, pid, params.cpu_weight);
 
             // parent
             log::info!("Child pid: {}", ret);
-            Ok(App {
-                name: params.name.to_string(),
-                state: State::Running(pid),
+            
+            Ok(AppRuntime {
+                pid,
                 stdout: pipe_stdout
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stdout"),
@@ -180,52 +221,36 @@ impl App {
                     .into_nonblocking_read_fd()
                     .expect("nonblocking stderr"),
                 cgroup,
-                start_params: params,
             })
         } else {
-            Err(AppErr::ForkFailed(ret))
+            Err(AppRuntimeError::ForkFailed(ret))
         }
     }
 
-    pub fn pid(&self) -> Option<u32> {
-        match self.state {
-            State::Running(pid) => Some(pid),
-            _ => None,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    pub fn poll(&mut self, logger: &dyn Logger) {
-        let State::Running(pid) = self.state else {
-            return;
-        };
-
+    fn poll(mut self, name: &str, logger: &dyn Logger) -> State {
         // Read stdout and stderr
         let mut buf = vec![0u8; 1024];
         if let Ok(rcvd) = self.stdout.read(&mut buf) {
-            log::debug!("app {} rcvd {} bytes from stdout", pid, rcvd);
+            log::debug!("app {} rcvd {} bytes from stdout", self.pid, rcvd);
             logger
-                .log(&self.name, pid, &buf[..rcvd])
+                .log(name, self.pid, &buf[..rcvd])
                 .expect("log stdout");
         } else {
             log::debug!(
                 "app {} no data from stdout: {}",
-                pid,
+                self.pid,
                 std::io::Error::last_os_error()
             );
         }
 
         if let Ok(rcvd) = self.stderr.read(&mut buf) {
-            log::debug!("app {} rcvd {} bytes from stderr", pid, rcvd);
+            log::debug!("app {} rcvd {} bytes from stderr", self.pid, rcvd);
             logger
-                .log(&self.name, pid, &buf[..rcvd])
+                .log(name, self.pid, &buf[..rcvd])
                 .expect("log stderr");
             log::debug!(
                 "app {} no data from stderr: {}",
-                pid,
+                self.pid,
                 std::io::Error::last_os_error()
             );
         }
@@ -233,10 +258,10 @@ impl App {
         // Poll state
         let mut status: i32 = 0;
         let options: i32 = WNOHANG;
-        let ret = unsafe { waitpid(pid as pid_t, &mut status, options) };
-        log::debug!("app: {} waitpid -> {} status: {}", pid, ret, status);
+        let ret = unsafe { waitpid(self.pid as pid_t, &mut status, options) };
+        log::debug!("app: {} waitpid -> {} status: {}", self.pid, ret, status);
 
-        if ret == pid as pid_t {
+        if ret == self.pid as pid_t {
             // children exited
 
             let signaled = WIFSIGNALED(status);
@@ -244,7 +269,7 @@ impl App {
                 let termsig = WTERMSIG(status);
                 log::info!(
                     "app {} terminated by signal {} ({})",
-                    pid,
+                    self.pid,
                     signal_name(termsig as usize).unwrap_or("UNKNOWN"),
                     termsig
                 );
@@ -258,71 +283,100 @@ impl App {
                 },
                 false => ReturnState::Abnormal,
             };
-            self.state = State::Terminated(return_state);
-            log::info!("app {} returned {:?}", pid, self.state);
+            log::info!("app {} returned {:?}", self.pid, return_state);
+            State::Terminated(return_state)
         } else if ret == 0 {
             // waiting
+            State::Running(self)
         } else {
             panic!("waitpid failed")
         }
     }
 
-    pub fn is_running(&self) -> bool {
-        matches!(self.state, State::Running(_))
-    }
-
-    pub fn is_terminated(&self) -> bool {
-        matches!(self.state, State::Terminated(_))
-    }
-
     pub fn sigterm(&self) -> io::Result<()> {
-        let State::Running(pid) = self.state else {
-            return Ok(());
-        };
-
-        let ret = unsafe { libc::kill(pid as pid_t, libc::SIGTERM) };
-        log::info!("app {} kill -> {}", pid, ret);
+        let ret = unsafe { libc::kill(self.pid as pid_t, libc::SIGTERM) };
+        log::info!("app {} kill -> {}", self.pid, ret);
         to_ioresult(ret)?;
         Ok(())
     }
 
     pub fn terminate(&self) -> io::Result<()> {
-        if let State::Running(pid) = self.state {
-            let ret = unsafe { libc::kill(pid as pid_t, libc::SIGKILL) };
-            log::info!("app {} kill -> {}", pid, ret);
-            if let Err(err) = to_ioresult(ret) {
-                log::error!("Failed to send SIGKILL to app {}: {}", pid, err);
-            }
+        let ret = unsafe { libc::kill(self.pid as pid_t, libc::SIGKILL) };
+        log::info!("app {} kill -> {}", self.pid, ret);
+        if let Err(err) = to_ioresult(ret) {
+            log::error!("Failed to send SIGKILL to app {}: {}", self.pid, err);
         }
 
         Ok(())
     }
+}
 
-    pub fn restart(self) -> Result<Self, AppErr> {
-        if let State::Terminated(_) = self.state {
-            let params = self.start_params.clone();
-            drop(self);
-            let app = App::start(params.clone())?;
-            Ok(app)
-        } else {
-            Ok(self)
+impl Drop for AppRuntime {
+    fn drop(&mut self) {
+        // pipe fds are automatically closed
+
+        if let Err(err) = self.cgroup.delete() {
+            log::error!("Failed to delete app cgroup: {}", err);
         }
+    }
+}
+
+impl App {
+    pub fn start(params: AppParams) -> Result<Self, AppErr> {
+        let runtime = AppRuntime::new(&params)?;
+            
+        Ok(App {
+            name: params.name.to_string(),
+            state: State::Running(runtime),
+            params,
+        })
+    }
+
+    pub fn restart(&mut self) -> Result<(), AppErr> {
+        if let State::Terminated(_) = self.state {
+            let runtime = AppRuntime::new(&self.params)?;
+            self.state = State::Running(runtime);
+        }
+        Ok(())
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn poll(&mut self, logger: &dyn Logger, try_restart: bool) {
+        // trick: `State::poll` consumes `self`, so swap in a placeholder to move the real
+        // state out of the `&mut self` reference.
+        let placeholder = State::Terminated(ReturnState::Abnormal);
+        self.state = std::mem::replace(&mut self.state, placeholder).poll(&self.name, logger);
+
+        // TODO evaluate the restart of the application
+        if try_restart {
+            if let Err(err) = self.restart() {
+                log::error!("Failed to restart app {}: {}", self.name, err);
+            }
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.state.is_running()
+    }
+
+    pub fn sigterm(&self) -> io::Result<()> {
+        self.state
+            .as_runtime()
+            .map_or(Ok(()), |app_runtime| app_runtime.sigterm())
+    }
+
+    pub fn terminate(&self) -> io::Result<()> {
+        self.state
+            .as_runtime()
+            .map_or(Ok(()), |app_runtime| app_runtime.terminate())
     }
 }
 
 impl Display for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "App {{ name: {}, state: {:?} }}", self.name, self.state)
-    }
-}
-
-impl Drop for App {
-    fn drop(&mut self) {
-        println!("Dropping app: {}", self.name);
-        if let State::Terminated(_) = self.state {
-            if let Err(err) = self.cgroup.delete() {
-                log::error!("Failed to delete app cgroup: {}", err);
-            }
-        }
     }
 }
