@@ -1,5 +1,7 @@
 apps_dir: .
 apps:
+  - name: app
+    command: /var/amy/app 10
   - name: id-root
     command: /usr/bin/id
     oneshot: true
@@ -18,6 +20,10 @@ apps:
     workdir: /tmp
     env:
       MYVAR1: value1
+
+
+
+
   # - name: default-env
   #   command: /usr/bin/env
   # - name: custom-env

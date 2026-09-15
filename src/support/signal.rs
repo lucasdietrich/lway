@@ -1,3 +1,9 @@
+use std::{ffi::c_int, io, mem::MaybeUninit, os::fd::RawFd};
+
+use libc::SFD_NONBLOCK;
+
+use crate::support::to_ioresult;
+
 /// Signal names indexed by signal number, for aarch64 (and generally
 /// x86/ARM "most other architectures" numbering per signal(7)).
 ///
@@ -44,4 +50,45 @@ pub static SIGNAL_NAMES: [&'static str; 32] = [
 /// or undefined slots.
 pub fn signal_name(sig: usize) -> Option<&'static str> {
     SIGNAL_NAMES.get(sig).filter(|s| !s.is_empty()).copied()
+}
+
+pub fn setup_signal_fd() -> io::Result<RawFd> {
+    let mut mask = MaybeUninit::<libc::sigset_t>::uninit();
+
+    unsafe { libc::sigemptyset(mask.as_mut_ptr()) };
+    unsafe { libc::sigaddset(mask.as_mut_ptr(), libc::SIGINT) };
+    // unsafe { libc::sigaddset(mask.as_mut_ptr(), libc::SIGHUP) };
+
+    let ret = unsafe { libc::sigprocmask(libc::SIG_BLOCK, mask.as_ptr(), std::ptr::null_mut()) };
+    to_ioresult(ret)?;
+
+    let mask = unsafe { mask.assume_init() };
+
+    let ret = unsafe { libc::signalfd(-1, &mask, SFD_NONBLOCK) };
+    let res = to_ioresult(ret)?;
+    Ok(res)
+}
+
+pub fn handle_signal_fd(signal_fd: &RawFd) -> libc::c_int {
+    let mut siginfo = MaybeUninit::<libc::signalfd_siginfo>::uninit();
+    let ret = unsafe {
+        libc::read(
+            *signal_fd,
+            siginfo.as_mut_ptr() as *mut _,
+            std::mem::size_of::<libc::signalfd_siginfo>(),
+        )
+    };
+    if ret == std::mem::size_of::<libc::signalfd_siginfo>() as isize {
+        let siginfo = unsafe { siginfo.assume_init() };
+        let signo = siginfo.ssi_signo as usize;
+        if let Some(name) = signal_name(signo) {
+            println!("Received signal: {} ({})", name, signo);
+        } else {
+            println!("Received unknown signal: {}", signo);
+        }
+
+        signo as c_int
+    } else {
+        -1
+    }
 }

@@ -1,19 +1,36 @@
-use std::{path::PathBuf, sync::atomic};
+use std::{io, path::PathBuf};
 
-use clap::Parser;
-use libc::SIGINT;
+use clap::{Parser, Subcommand};
+use mio::{unix::SourceFd, Events, Poll, Token};
 
-use crate::{cgroups::init_main_cgroup, config::GlobalConfig, runtime::App};
+use crate::{
+    cgroups::init_main_cgroup, config::GlobalConfig, mio_token_slab::MioTokenSlab, runtime::App,
+    support::signal::handle_signal_fd,
+};
 
 pub mod cgroups;
 pub mod config;
+pub mod ipc;
 pub mod logger;
+pub mod mio_token_slab;
 pub mod parser;
 pub mod pipe;
+pub mod protocol;
 pub mod runtime;
 pub mod support;
 
 const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
+// world-writable /tmp is fine for local experimentation; a real deployment
+// running as root should keep this under /run.
+const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
+
+// Number of SIGINTs to tolerate before exiting
+const SIGINT_LIMIT: usize = 2;
+
+pub const UNIX_LISTENER_TOKEN: Token = Token(0);
+pub const SIGNALFD_TOKEN: Token = Token(1);
+pub const RESERVED_MIO_TOKENS: usize = 2;
+pub const MAX_MIO_TOKENS: usize = 128;
 
 /// lway - a tiny process supervisor
 #[derive(Parser, Debug)]
@@ -26,30 +43,30 @@ struct Cli {
     /// Path to the global configuration file
     #[arg(short = 'c', long = "config")]
     config: Option<PathBuf>,
+
+    /// Path to the daemon's control socket
+    #[arg(long = "socket")]
+    socket: Option<PathBuf>,
+
+    /// Run as the background supervisor instead of a CLI client
+    #[arg(long = "daemon")]
+    daemon: bool,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// List apps supervised by the running daemon
+    List,
 }
 
 pub struct Runtime {
     apps: Vec<App>,
     stopping: bool,
-}
-
-static SIGINT_COUNT: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
-const SIGINT_LIMIT: usize = 3;
-
-extern "C" fn handler(signal: i32) {
-    println!("Received signal: {}", signal);
-    if signal == SIGINT {
-        let sigint_count = SIGINT_COUNT.fetch_add(1, atomic::Ordering::SeqCst);
-        if sigint_count >= (SIGINT_LIMIT - 1) {
-            println!(
-                "Received SIGINT {} times, exiting immediately",
-                sigint_count
-            );
-            std::process::exit(1);
-        } else {
-            println!("SIGINT received {} times", sigint_count);
-        }
-    }
+    sigint_count: usize,
+    mio_token_slab: MioTokenSlab,
 }
 
 impl Runtime {
@@ -57,6 +74,8 @@ impl Runtime {
         Runtime {
             apps: Vec::new(),
             stopping: false,
+            sigint_count: 0,
+            mio_token_slab: MioTokenSlab::new(MAX_MIO_TOKENS, RESERVED_MIO_TOKENS),
         }
     }
 }
@@ -64,12 +83,26 @@ impl Runtime {
 fn main() {
     let cli = Cli::parse();
 
+    let socket_path = cli
+        .socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
+
+    if !cli.daemon {
+        let command = cli.command.unwrap_or_else(|| {
+            eprintln!("no command given, use --help");
+            std::process::exit(1);
+        });
+        match command {
+            Command::List => run_list_client(&socket_path),
+        }
+        return;
+    }
+
     let log_level = match cli.verbose {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
+        0 => log::LevelFilter::Warn,
+        1 => log::LevelFilter::Info,
+        2 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
 
@@ -93,16 +126,21 @@ fn main() {
     let apps = global_cfg.all_apps(&config_path);
     log::info!("{:#?}", apps);
 
-    let ret = unsafe { libc::signal(SIGINT, handler as *const () as libc::sighandler_t) };
-    if ret == libc::SIG_ERR {
-        log::error!("Failed to set signal handler");
-        std::process::exit(1);
-    }
+    let signalfd = match support::signal::setup_signal_fd() {
+        Ok(fd) => fd,
+        Err(e) => {
+            log::error!("Failed to set up signal fd: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let mut signal_sourcefd = SourceFd(&signalfd);
 
     let mut rt = Runtime::init();
-    let logger = logger::StdoutLogger;
+    let logger = logger::StdoutLogger::default();
 
     let main_cg = init_main_cgroup();
+
+    let mut poll = Poll::new().expect("create mio poll");
 
     for app_cfg in apps.into_iter() {
         let uid = app_cfg.resolved_uid();
@@ -134,39 +172,106 @@ fn main() {
             cgroup: app_cfg.cgroup,
         };
 
-        let app = App::start(params).expect("run_app");
+        let app = App::new(params, &poll, &mut rt.mio_token_slab).expect("run_app");
         rt.apps.push(app);
     }
 
-    loop {
-        unsafe {
-            libc::sleep(1);
-        }
+    let mut ipc_server = ipc::Server::bind(&socket_path, &poll, ipc::DEFAULT_MAX_CONNECTIONS)
+        .unwrap_or_else(|e| {
+            log::error!(
+                "Failed to bind control socket {}: {}",
+                socket_path.display(),
+                e
+            );
+            std::process::exit(1);
+        });
 
-        // If Ctrl+C (SIGINT) was received
-        let sigint_count = SIGINT_COUNT.load(atomic::Ordering::SeqCst);
-        if sigint_count > 0 {
-            println!("SIGINT received {} times", sigint_count);
-            rt.stopping = true;
-            if sigint_count >= SIGINT_LIMIT - 1 {
-                // Send SIGKILL to all child processes
-                for app in rt.apps.iter() {
-                    if let Err(e) = app.terminate() {
-                        log::error!("Failed to send SIGKILL to {}: {}", app, e);
-                    }
-                }
-            } else {
-                // Send SIGTERM to all child processes
-                for app in rt.apps.iter() {
-                    if let Err(e) = app.sigterm() {
-                        log::error!("Failed to send SIGTERM to {}: {}", app, e);
-                    }
-                }
+    poll.registry()
+        .register(
+            &mut signal_sourcefd,
+            SIGNALFD_TOKEN,
+            mio::Interest::READABLE,
+        )
+        .expect("register signal fd");
+
+    let mut events = Events::with_capacity(MAX_MIO_TOKENS);
+
+    loop {
+        if let Err(e) = poll.poll(&mut events, None) {
+            if e.kind() != io::ErrorKind::Interrupted {
+                log::error!("control socket poll error: {}", e);
             }
         }
 
-        for app in rt.apps.iter_mut() {
-            app.poll(&logger, !rt.stopping);
+        for event in events.iter() {
+            let token = event.token();
+            log::debug!("poll ready for token: {:?} event: {:?}", token, event);
+
+            if token == SIGNALFD_TOKEN {
+                match handle_signal_fd(&signalfd) {
+                    // Increment the SIGINT count and mark the runtime as stopping
+                    libc::SIGINT => {
+                        rt.sigint_count += 1;
+                        rt.stopping = true;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            if token == UNIX_LISTENER_TOKEN {
+                if let Err(e) = ipc_server.accept_all(&poll, &mut rt.mio_token_slab) {
+                    log::error!("failed to accept control connection: {}", e);
+                }
+                continue;
+            }
+
+            if ipc_server.is_known(token) {
+                if event.is_readable() {
+                    if let Err(e) = ipc_server.handle_readable(token, &rt.apps) {
+                        log::error!("control connection read error: {}", e);
+                        ipc_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                if event.is_writable() {
+                    if let Err(e) = ipc_server.handle_writable(token) {
+                        log::error!("control connection write error: {}", e);
+                        ipc_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                ipc_server.reconcile(token, &poll, &mut rt.mio_token_slab);
+            }
+
+            // Create the equivalent is_known() for applications
+            for app in rt.apps.iter_mut() {
+                app.poll(
+                    &poll,
+                    &mut rt.mio_token_slab,
+                    token,
+                    event,
+                    &logger,
+                    !rt.stopping,
+                )
+            }
+        }
+
+        // If Ctrl+C (SIGINT) was received
+        if rt.sigint_count > SIGINT_LIMIT {
+            log::info!("Sending SIGKILL to all child processes");
+            for app in rt.apps.iter() {
+                if let Err(e) = app.sigkill() {
+                    log::error!("Failed to send SIGKILL to {}: {}", app, e);
+                }
+            }
+        } else if rt.sigint_count > 0 {
+            log::info!("Sending SIGTERM to all child processes");
+            for app in rt.apps.iter() {
+                if let Err(e) = app.sigterm() {
+                    log::error!("Failed to send SIGTERM to {}: {}", app, e);
+                }
+            }
         }
 
         if rt.apps.iter().filter(|app| app.is_running()).count() == 0 {
@@ -175,5 +280,17 @@ fn main() {
         }
     }
 
+    let _ = std::fs::remove_file(&socket_path);
     main_cg.delete().expect("Failed to delete main cgroup");
+}
+
+/// Connects to a running daemon, requests the app list and prints it as a table.
+fn run_list_client(socket_path: &PathBuf) {
+    match ipc::list_apps(socket_path) {
+        Ok(apps) => ipc::print_apps_table(&apps),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
 }

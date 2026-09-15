@@ -8,6 +8,7 @@
 #include <string.h>
 
 static int sigint_count = 0;
+static int sigterm_count = 0;
 
 void sigint(int signum) {
     printf("Caught signal %d (SIGINT)\n", signum);
@@ -17,6 +18,11 @@ void sigint(int signum) {
         printf("Exiting after %d SIGINTs\n", sigint_count);
         exit(EXIT_FAILURE);
     }
+}
+
+void sigterm(int signum) {
+    printf("Caught signal %d (SIGTERM)\n", signum);
+    sigterm_count++;
 }
 
 void daemonize() {
@@ -104,6 +110,10 @@ int main(int argc, char *argv[]) {
 
     // Ctrl +C
     signal(SIGINT, sigint);
+    signal(SIGTERM, sigterm);
+
+    // // Close stderr
+    // close(STDERR_FILENO);
 
     for (;;) {
         printf("Tick %u\n", i);

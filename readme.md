@@ -3,17 +3,18 @@
 - [ ] Kill all OR get them back if exit lway
 - [x] allow to add env vars
 - [ ] setsid
-- [ ] cwd
+- [x] cwd
 - [ ] user/group support
 - [ ] CLI:
     - [ ] create workspace: https://claude.ai/chat/e6d0b828-962c-43c3-8804-592927e3ed5b
-    - [ ] cli: clap
-        - [ ] list apps
+    - [x] cli: clap
+        - [x] list apps
+            - [ ] more infos: uid,gid,cwd,restart count, logs count, restart stats, usage (cpu, mem, io)
         - [ ] start/stop/restart/status/stats
         - [ ] cgroup control
-    - [ ] protocol: json + serde
-    - [ ] daemon
-- [ ] poll apps + IPC events
+    - [x] protocol: json + serde
+    - [x] daemon
+- [x] poll apps + IPC events
 - [ ] react to "reload" (SIGUP signal): https://claude.ai/chat/09d6152f-8b4e-49c5-bc10-5238c8e75899
 - [ ] yocto integration
 - [x] add cgroup support
@@ -26,3 +27,8 @@
 - [x] automatically restart a service which crashes or exits unexpectedly
 - [x] oneshot mode for apps (don't restart them if they exit successfully)
 - [ ] setsid (create a new session leader for each app)
+- [ ] enrich restart strategies
+    - [ ] restart delay
+    - [ ] exponential backoff for restart
+    - [ ] restart on failure/success
+    - [ ] consecutive failures threshold for deactivation

@@ -47,7 +47,7 @@ pub struct AppCgroupConfig {
 ///
 /// Tasks must live in leaf cgroups: cgroup v2's "no internal process constraint" forbids a
 /// cgroup from holding tasks directly once it delegates controllers to children.
-pub fn init_app_cgroup(name: &str, pid: u32, config: &AppCgroupConfig) -> Cgroup {
+pub fn init_app_cgroup(name: &str, pid: libc::pid_t, config: &AppCgroupConfig) -> Cgroup {
     let path = format!("{}/ly-{}", LWAY_CGROUP_NAME, name);
     let hier = cgroups_rs::fs::hierarchies::auto();
 
