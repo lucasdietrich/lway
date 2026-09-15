@@ -199,9 +199,7 @@ fn main() {
     let mut events = Events::with_capacity(MAX_MIO_TOKENS);
 
     loop {
-        // Doubles as the supervisor's ~1s poll tick: app health/output is
-        // checked once per iteration below regardless of what woke us up.
-        if let Err(e) = poll.poll(&mut events, Some(Duration::from_secs(1))) {
+        if let Err(e) = poll.poll(&mut events, None) {
             if e.kind() != io::ErrorKind::Interrupted {
                 log::error!("control socket poll error: {}", e);
             }
