@@ -214,6 +214,18 @@ pub enum ReturnState {
     Abnormal, // Tell whether the process returned normally (call to exit or return from main)
 }
 
+/// Non-blocking check of a child's exit status via `waitpid(WNOHANG)`.
+///
+/// Logs the signal name if the child was terminated by a signal, and the
+/// exit code if it exited normally.
+///
+/// Returns:
+/// - `Some(ReturnState::Completed { ret })` if the child exited normally with code `ret`.
+/// - `Some(ReturnState::Abnormal)` if the child terminated abnormally (e.g. by a signal).
+/// - `None` if the child is still running.
+///
+/// # Panics
+/// Panics if `waitpid` fails (e.g. `pid` is not a valid/reapable child of this process).
 fn poll_pid(pid: pid_t) -> Option<ReturnState> {
     // Poll state
     let mut status: i32 = 0;
@@ -246,7 +258,7 @@ fn poll_pid(pid: pid_t) -> Option<ReturnState> {
         log::info!("app {} returned {:?}", pid, return_state);
         Some(return_state)
     } else if ret == 0 {
-        // waiting
+        // child still running
         None
     } else {
         panic!("waitpid failed")
