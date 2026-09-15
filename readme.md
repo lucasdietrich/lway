@@ -34,3 +34,7 @@
     - [ ] consecutive failures threshold for deactivation
 - [ ] improve handling of immediate failures:
     - [ ] command fails at start immediately
+- [ ] add starts groups, priority and dependencies
+    - [ ] start order
+    - [ ] priority levels
+    - [ ] dependency management

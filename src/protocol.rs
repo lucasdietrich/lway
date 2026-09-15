@@ -12,6 +12,17 @@ pub enum Request {
     List,
     /// Get runtime statistics for a single app.
     Stats { name: String },
+    /// Start a stopped app.
+    Start { name: String },
+    /// Start every currently stopped app.
+    StartAll,
+}
+
+/// A single app that failed to start as part of a `StartAll` request.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StartFailure {
+    pub name: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,6 +53,15 @@ pub enum Response {
     AppStats {
         name: String,
         stats: AppStats,
+    },
+    /// The requested app was successfully started.
+    Started {
+        name: String,
+    },
+    /// Result of a `StartAll` request; `failed` is empty on full success.
+    StartedAll {
+        started: Vec<String>,
+        failed: Vec<StartFailure>,
     },
     /// Requested app doesn't exist; `apps` lists the currently supervised names.
     AppNotFound {

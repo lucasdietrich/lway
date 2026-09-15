@@ -25,8 +25,14 @@ pub struct AppConfig {
     pub env: Option<HashMap<String, String>>,
     #[serde(default)]
     pub oneshot: bool,
+    #[serde(default = "default_autostart")]
+    pub autostart: bool,
     #[serde(flatten)]
     pub cgroup: AppCgroupConfig,
+}
+
+fn default_autostart() -> bool {
+    true
 }
 
 impl AppConfig {

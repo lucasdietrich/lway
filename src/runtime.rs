@@ -35,6 +35,8 @@ const STDIO_BUFFER_SIZE: usize = 4096;
 pub enum AppErr {
     #[error("Runtime error: {0}")]
     Runtime(#[from] AppRuntimeError),
+    #[error("App already running")]
+    AlreadyRunning,
 }
 
 // remake <'a>
@@ -49,6 +51,7 @@ pub struct AppParams {
     pub env: Vec<String>,
     pub oneshot: bool,
     pub cgroup: AppCgroupConfig,
+    pub autostart: bool, // App automatically starts on creation
 }
 
 #[derive(Debug)]
@@ -77,19 +80,35 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(
+    pub fn create(
         params: AppParams,
         poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
     ) -> Result<Self, AppErr> {
-        let runtime = AppRuntime::start(&params, &poll, token_slab)?;
+        let state = match params.autostart {
+            true => {
+                let runtime = AppRuntime::start(&params, &poll, token_slab)?;
+                State::Running(runtime)
+            }
+            false => State::Stopped,
+        };
 
         Ok(App {
             name: params.name.to_string(),
-            state: State::Running(runtime),
+            state,
             params,
             runtime_stats: AppRuntimeStats::default(),
         })
+    }
+
+    pub fn start(&mut self, poll: &mio::Poll, token_slab: &mut MioTokenSlab) -> Result<(), AppErr> {
+        if let State::Stopped = self.state {
+            let runtime = AppRuntime::start(&self.params, &poll, token_slab)?;
+            self.state = State::Running(runtime);
+            Ok(())
+        } else {
+            Err(AppErr::AlreadyRunning)
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -102,6 +121,7 @@ impl App {
 
     pub fn status_string(&self) -> String {
         match &self.state {
+            State::Stopped => "stopped".to_string(),
             State::Running(..) => "running".to_string(),
             State::Terminated(ReturnState::Completed { ret }) => format!("exited({})", ret),
             State::Terminated(ReturnState::Abnormal { signal }) => format!(
@@ -139,7 +159,7 @@ impl App {
     pub fn stats(&self) -> AppStats {
         let (uptime, cgroup_usage) = match &self.state {
             State::Running(rt) => (Some(rt.started_at.elapsed()), read_cgroup_usage(&rt.cgroup)),
-            State::Terminated(..) => (None, CgroupUsage::default()),
+            State::Stopped | State::Terminated(..) => (None, CgroupUsage::default()),
         };
 
         AppStats {
@@ -584,6 +604,7 @@ impl Drop for AppRuntime {
 
 #[derive(Debug)]
 enum State {
+    Stopped,
     Running(AppRuntime),
     Terminated(ReturnState),
 }

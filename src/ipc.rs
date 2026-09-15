@@ -17,7 +17,7 @@ use mio::net::{UnixListener, UnixStream};
 use mio::{Interest, Poll, Token};
 use thiserror::Error;
 
-use crate::protocol::{AppInfo, Request, Response};
+use crate::protocol::{AppInfo, Request, Response, StartFailure};
 use crate::runtime::App;
 use crate::support::mio_token_slab::MioTokenSlab;
 use crate::UNIX_LISTENER_TOKEN;
@@ -138,7 +138,13 @@ impl Server {
     }
 
     /// Reads and dispatches every complete request currently buffered on `token`.
-    pub fn handle_readable(&mut self, token: Token, apps: &[App]) -> Result<()> {
+    pub fn handle_readable(
+        &mut self,
+        token: Token,
+        apps: &mut [App],
+        poll: &Poll,
+        token_slab: &mut MioTokenSlab,
+    ) -> Result<()> {
         let conn = match self.connections.get_mut(&token) {
             Some(c) => c,
             None => return Ok(()),
@@ -178,6 +184,34 @@ impl Server {
                         apps: apps.iter().map(|app| app.name().to_string()).collect(),
                     },
                 },
+                Ok(Request::Start { name }) => {
+                    match apps.iter_mut().find(|app| app.name() == name) {
+                        Some(app) => match app.start(poll, token_slab) {
+                            Ok(()) => Response::Started { name },
+                            Err(e) => Response::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        None => Response::AppNotFound {
+                            name,
+                            apps: apps.iter().map(|app| app.name().to_string()).collect(),
+                        },
+                    }
+                }
+                Ok(Request::StartAll) => {
+                    let mut started = Vec::new();
+                    let mut failed = Vec::new();
+                    for app in apps.iter_mut().filter(|app| !app.is_running()) {
+                        match app.start(poll, token_slab) {
+                            Ok(()) => started.push(app.name().to_string()),
+                            Err(e) => failed.push(StartFailure {
+                                name: app.name().to_string(),
+                                message: e.to_string(),
+                            }),
+                        }
+                    }
+                    Response::StartedAll { started, failed }
+                }
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },

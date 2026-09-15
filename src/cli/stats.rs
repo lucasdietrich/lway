@@ -1,7 +1,5 @@
 //! `stats` CLI command: fetch and display a single app's runtime statistics.
 
-use std::io;
-use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -9,36 +7,22 @@ use crate::ipc::{IpcError, Result};
 use crate::protocol::{Request, Response};
 use crate::stats::AppStats;
 
+use super::send_request;
+
 /// Connects to the daemon's control socket and requests stats for `name`.
 /// Blocking: this is a short-lived one-shot call.
 pub fn get_stats(socket_path: &Path, name: &str) -> Result<AppStats> {
-    use std::io::BufRead;
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|_| IpcError::NotRunning(socket_path.to_path_buf()))?;
-
-    let mut request = serde_json::to_string(&Request::Stats {
-        name: name.to_string(),
-    })?;
-    request.push('\n');
-    stream.write_all(request.as_bytes())?;
-
-    let mut reader = io::BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    if line.trim().is_empty() {
-        return Err(IpcError::Io(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "daemon closed the connection without responding",
-        )));
-    }
-
-    match serde_json::from_str::<Response>(line.trim())? {
+    let response = send_request(
+        socket_path,
+        &Request::Stats {
+            name: name.to_string(),
+        },
+    )?;
+    match response {
         Response::AppStats { stats, .. } => Ok(stats),
         Response::AppNotFound { name, apps } => Err(IpcError::AppNotFound { name, apps }),
         Response::Error { message } => Err(IpcError::Daemon(message)),
-        Response::AppList { .. } => Err(IpcError::Daemon("unexpected response".to_string())),
+        _ => Err(IpcError::Daemon("unexpected response".to_string())),
     }
 }
 

@@ -71,6 +71,13 @@ enum Command {
         /// Name of the app to query
         name: String,
     },
+    /// Start a stopped app
+    Start {
+        /// Name of the app to start
+        name: String,
+    },
+    /// Start every currently stopped app
+    StartAll,
 }
 
 pub struct Runtime {
@@ -108,6 +115,8 @@ fn main() {
         match command {
             Command::List => run_list_client(&socket_path),
             Command::Stats { name } => run_stats_client(&socket_path, &name),
+            Command::Start { name } => run_start_client(&socket_path, &name),
+            Command::StartAll => run_start_all_client(&socket_path),
         }
         return;
     }
@@ -188,9 +197,10 @@ fn main() {
             env,
             oneshot: app_cfg.oneshot,
             cgroup: app_cfg.cgroup,
+            autostart: app_cfg.autostart,
         };
 
-        let app = App::new(params, &poll, &mut rt.mio_token_slab).expect("run_app");
+        let app = App::create(params, &poll, &mut rt.mio_token_slab).expect("run_app");
         rt.apps.push(app);
     }
 
@@ -246,7 +256,12 @@ fn main() {
 
             if ipc_server.is_known(token) {
                 if event.is_readable() {
-                    if let Err(e) = ipc_server.handle_readable(token, &rt.apps) {
+                    if let Err(e) = ipc_server.handle_readable(
+                        token,
+                        &mut rt.apps,
+                        &poll,
+                        &mut rt.mio_token_slab,
+                    ) {
                         log::error!("control connection read error: {}", e);
                         ipc_server.close(token, &poll, &mut rt.mio_token_slab);
                         continue;
@@ -317,6 +332,33 @@ fn run_list_client(socket_path: &PathBuf) {
 fn run_stats_client(socket_path: &PathBuf, name: &str) {
     match cli::stats::get_stats(socket_path, name) {
         Ok(stats) => cli::stats::print_stats(name, &stats),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Connects to a running daemon and requests that a stopped app be started.
+fn run_start_client(socket_path: &PathBuf, name: &str) {
+    match cli::start::start_app(socket_path, name) {
+        Ok(()) => println!("started {}", name),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Connects to a running daemon and requests that every stopped app be started.
+fn run_start_all_client(socket_path: &PathBuf) {
+    match cli::start::start_all_apps(socket_path) {
+        Ok((started, failed)) => {
+            cli::start::print_start_all_result(&started, &failed);
+            if !failed.is_empty() {
+                std::process::exit(1);
+            }
+        }
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
