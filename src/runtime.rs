@@ -29,10 +29,6 @@ use crate::{
 pub enum AppErr {
     #[error("Runtime error: {0}")]
     Runtime(#[from] AppRuntimeError),
-    #[error("poll registration error: {0}")]
-    PollRegistration(#[from] io::Error),
-    #[error("Token allocation error")]
-    TokenAllocation,
 }
 
 // remake <'a>
