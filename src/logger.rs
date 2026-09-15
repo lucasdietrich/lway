@@ -22,7 +22,9 @@ impl StdoutLogger {
 
 impl Default for StdoutLogger {
     fn default() -> Self {
-        Self { gutter_width: DEFAULT_GUTTER_WIDTH }
+        Self {
+            gutter_width: DEFAULT_GUTTER_WIDTH,
+        }
     }
 }
 

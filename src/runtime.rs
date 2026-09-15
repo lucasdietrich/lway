@@ -1,5 +1,9 @@
 use std::{
-    ffi::{CString, c_int}, fmt::Display, io::{self, Error, Read}, os::fd::{AsFd, AsRawFd, RawFd}, str::FromStr,
+    ffi::{c_int, CString},
+    fmt::Display,
+    io::{self, Error, Read},
+    os::fd::{AsRawFd, RawFd},
+    str::FromStr,
 };
 
 use cgroups_rs::fs::Cgroup;
@@ -7,7 +11,7 @@ use libc::{
     c_char, dup2, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
     WIFSIGNALED, WNOHANG, WTERMSIG,
 };
-use mio::{event, unix::SourceFd};
+use mio::unix::SourceFd;
 use thiserror::Error;
 
 use crate::{
@@ -24,6 +28,8 @@ pub enum AppErr {
     Runtime(#[from] AppRuntimeError),
     #[error("poll registration error: {0}")]
     PollRegistration(#[from] io::Error),
+    #[error("Token allocation error")]
+    TokenAllocation,
 }
 
 // remake <'a>
@@ -40,98 +46,46 @@ pub struct AppParams {
     pub cgroup: AppCgroupConfig,
 }
 
+#[derive(Debug)]
 struct AppRtTokens {
     pub pidfd: mio::Token,
     pub stdout: mio::Token,
     pub stderr: mio::Token,
 }
 
-impl AppRtTokens {
-    pub fn matches(&self, token: mio::Token) -> bool {
-        self.pidfd == token || self.stdout == token || self.stderr == token
-    }
-}
-
 pub struct App {
     name: String,
     params: AppParams,
     state: State,
-
-    // related tokens
-    tokens: Option<AppRtTokens>,
 }
 
 impl App {
-    pub fn start(
+    pub fn new(
         params: AppParams,
-        poll: &mut mio::Poll,
+        poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
     ) -> Result<Self, AppErr> {
-        let runtime = AppRuntime::new(&params)?;
-
-        log::info!("App {} started with pid: {}", &params.name, runtime.pid);
-
-        // Register the pidfd with the poll instance
-        let mut pidfd_sourcefd = SourceFd(&runtime.get_pidfd());
-        let pidfd_token = token_slab.allocate().expect("allocate mio token");
-        poll.registry()
-            .register(&mut pidfd_sourcefd, pidfd_token, mio::Interest::READABLE)?;
-
-        let stdout_token = token_slab.allocate().expect("allocate mio token");
-        let mut stdout_sourcefd = SourceFd(&runtime.get_stdout_fd());
-        poll.registry()
-            .register(&mut stdout_sourcefd, stdout_token, mio::Interest::READABLE)?;
-
-        let stderr_token = token_slab.allocate().expect("allocate mio token");
-        let mut stderr_sourcefd = SourceFd(&runtime.get_stderr_fd());
-        poll.registry()
-            .register(&mut stderr_sourcefd, stderr_token, mio::Interest::READABLE)?;
+        let (runtime, tokens) = Self::start(&params, &poll, token_slab)?;
 
         Ok(App {
             name: params.name.to_string(),
-            state: State::Running(runtime),
+            state: State::Running(runtime, tokens),
             params,
-            tokens: Some(AppRtTokens {
-                pidfd: pidfd_token,
-                stdout: stdout_token,
-                stderr: stderr_token,
-            }),
         })
     }
 
-    pub fn restart(&mut self,
+    fn start(
+        params: &AppParams,
         poll: &mio::Poll,
-        token_slab: &mut MioTokenSlab) -> Result<(), AppErr> {
-        if let State::Terminated(_) = self.state {
-            let runtime = AppRuntime::new(&self.params)?;
+        token_slab: &mut MioTokenSlab,
+    ) -> Result<(AppRuntime, AppRtTokens), AppErr> {
+        let runtime = AppRuntime::new(params)?;
 
-            log::info!("App {} started with pid: {}", self.name, runtime.pid);
+        log::info!("App {} started with pid: {}", &params.name, runtime.pid);
 
-            // Register the pidfd with the poll instance
-            let mut pidfd_sourcefd = SourceFd(&runtime.get_pidfd());
-            let pidfd_token = token_slab.allocate().expect("allocate mio token");
-            poll.registry()
-                .register(&mut pidfd_sourcefd, pidfd_token, mio::Interest::READABLE)?;
+        let tokens = runtime.poll_register(poll, token_slab)?;
 
-            let stdout_token = token_slab.allocate().expect("allocate mio token");
-            let mut stdout_sourcefd = SourceFd(&runtime.get_stdout_fd());
-            poll.registry()
-                .register(&mut stdout_sourcefd, stdout_token, mio::Interest::READABLE)?;
-
-            let stderr_token = token_slab.allocate().expect("allocate mio token");
-            let mut stderr_sourcefd = SourceFd(&runtime.get_stderr_fd());
-            poll.registry()
-                .register(&mut stderr_sourcefd, stderr_token, mio::Interest::READABLE)?;
-
-            self.tokens = Some(AppRtTokens {
-                pidfd: pidfd_token,
-                stdout: stdout_token,
-                stderr: stderr_token,
-            });
-            
-            self.state = State::Running(runtime);
-        }
-        Ok(())
+        Ok((runtime, tokens))
     }
 
     pub fn name(&self) -> &str {
@@ -144,7 +98,7 @@ impl App {
 
     pub fn status_string(&self) -> String {
         match &self.state {
-            State::Running(_) => "running".to_string(),
+            State::Running(..) => "running".to_string(),
             State::Terminated(ReturnState::Completed { ret }) => format!("exited({})", ret),
             State::Terminated(ReturnState::Abnormal) => "abnormal".to_string(),
         }
@@ -167,16 +121,14 @@ impl App {
         logger: &dyn Logger,
         try_restart: bool,
     ) {
-        if !self.state.is_running() {
+        let State::Running(rt, tokens) = &mut self.state else {
             return;
-        }
+        };
 
         // logging: Read stdout and stderr
         let mut buf = vec![0u8; 1024];
 
-        let rt = self.state.as_runtime_mut().unwrap();
-
-        if token == self.tokens.as_ref().unwrap().stdout {
+        if token == tokens.stdout {
             if event.is_readable() {
                 if let Ok(rcvd) = rt.stdout.read(&mut buf) {
                     log::debug!("app {} rcvd {} bytes from stdout", rt.pid, rcvd);
@@ -197,7 +149,7 @@ impl App {
             }
         }
 
-        if token == self.tokens.as_ref().unwrap().stderr {
+        if token == tokens.stderr {
             if event.is_readable() {
                 if let Ok(rcvd) = rt.stderr.read(&mut buf) {
                     log::debug!("app {} rcvd {} bytes from stderr", rt.pid, rcvd);
@@ -218,34 +170,29 @@ impl App {
             }
         }
 
-        // pidfd
-        if token == self.tokens.as_ref().unwrap().pidfd && event.is_readable() {
-            let rt = self.state.as_runtime().unwrap();
-
+        // handle process termination
+        if token == tokens.pidfd && event.is_readable() {
             if let Some(return_state) = poll_pid(rt.pid) {
+                {
+                    let terminated = State::Terminated(return_state);
+                    let State::Running(rt, tokens) = std::mem::replace(&mut self.state, terminated)
+                    else {
+                        unreachable!();
+                    };
 
-                // deregister the pidfd from the poll instance
-                let mut pidfd_sourcefd = SourceFd(&rt.get_pidfd());
-                poll.registry().deregister(&mut pidfd_sourcefd).expect("Failed to deregister pidfd");
+                    rt.poll_deregister(poll, token_slab, tokens)
+                        .expect("Failed to deregister app runtime");
 
-                let mut stdout_sourcefd = SourceFd(&rt.get_stdout_fd());
-                poll.registry().deregister(&mut stdout_sourcefd).expect("Failed to deregister stdout");
+                    self.state = State::Terminated(return_state);
 
-                let mut stderr_sourcefd = SourceFd(&rt.get_stderr_fd());
-                poll.registry().deregister(&mut stderr_sourcefd).expect("Failed to deregister stderr");
+                    // AppRuntime is getting dropped in the background (clearing cgroups, etc ...)
+                }
 
-                let tokens = self.tokens.take().unwrap();
-                token_slab.free(tokens.pidfd);
-                token_slab.free(tokens.stdout);
-                token_slab.free(tokens.stderr);
-
-                // AppRuntime is getting dropped in the background
-                self.state = State::Terminated(return_state);
-
-                // TODO evaluate the restart of the application
+                // evaluate the restart of the application
                 if try_restart && !self.params.oneshot {
-                    if let Err(err) = self.restart(poll, token_slab) {
-                        log::error!("Failed to restart app {}: {}", self.name, err);
+                    match Self::start(&self.params, &poll, token_slab) {
+                        Ok((runtime, tokens)) => self.state = State::Running(runtime, tokens),
+                        Err(err) => log::error!("Failed to restart app {}: {}", self.name, err),
                     }
                 }
             }
@@ -280,6 +227,45 @@ pub enum ReturnState {
     // Tell whether the process returned normally
     Completed { ret: i32 },
     Abnormal, // Tell whether the process returned normally (call to exit or return from main)
+}
+
+fn poll_pid(pid: pid_t) -> Option<ReturnState> {
+    // Poll state
+    let mut status: i32 = 0;
+    let options: i32 = WNOHANG;
+    let ret = unsafe { waitpid(pid as libc::pid_t, &mut status, options) };
+    log::debug!("app: {} waitpid -> {} status: {}", pid, ret, status);
+
+    if ret == pid as libc::pid_t {
+        // children exited
+
+        let signaled = WIFSIGNALED(status);
+        if signaled {
+            let termsig = WTERMSIG(status);
+            log::info!(
+                "app {} terminated by signal {} ({})",
+                pid,
+                signal_name(termsig as usize).unwrap_or("UNKNOWN"),
+                termsig
+            );
+        }
+
+        // parse status
+        let normal = WIFEXITED(status);
+        let return_state = match normal {
+            true => ReturnState::Completed {
+                ret: WEXITSTATUS(status),
+            },
+            false => ReturnState::Abnormal,
+        };
+        log::info!("app {} returned {:?}", pid, return_state);
+        Some(return_state)
+    } else if ret == 0 {
+        // waiting
+        None
+    } else {
+        panic!("waitpid failed")
+    }
 }
 
 #[derive(Debug, Error)]
@@ -449,6 +435,54 @@ impl AppRuntime {
     pub fn get_stderr_fd(&self) -> RawFd {
         self.stderr.as_raw_fd()
     }
+
+    fn poll_register(
+        &self,
+        poll: &mio::Poll,
+        token_slab: &mut MioTokenSlab,
+    ) -> Result<AppRtTokens, AppErr> {
+        let mut pidfd_sourcefd = SourceFd(&self.get_pidfd());
+        let pidfd_token = token_slab.allocate().ok_or(AppErr::TokenAllocation)?;
+        poll.registry()
+            .register(&mut pidfd_sourcefd, pidfd_token, mio::Interest::READABLE)?;
+
+        let stdout_token = token_slab.allocate().ok_or(AppErr::TokenAllocation)?;
+        let mut stdout_sourcefd = SourceFd(&self.get_stdout_fd());
+        poll.registry()
+            .register(&mut stdout_sourcefd, stdout_token, mio::Interest::READABLE)?;
+
+        let stderr_token = token_slab.allocate().ok_or(AppErr::TokenAllocation)?;
+        let mut stderr_sourcefd = SourceFd(&self.get_stderr_fd());
+        poll.registry()
+            .register(&mut stderr_sourcefd, stderr_token, mio::Interest::READABLE)?;
+
+        Ok(AppRtTokens {
+            pidfd: pidfd_token,
+            stdout: stdout_token,
+            stderr: stderr_token,
+        })
+    }
+
+    fn poll_deregister(
+        &self,
+        poll: &mio::Poll,
+        token_slab: &mut MioTokenSlab,
+        tokens: AppRtTokens,
+    ) -> Result<(), AppErr> {
+        let mut pidfd_sourcefd = SourceFd(&self.get_pidfd());
+        poll.registry().deregister(&mut pidfd_sourcefd)?;
+        token_slab.free(tokens.pidfd);
+
+        let mut stdout_sourcefd = SourceFd(&self.get_stdout_fd());
+        poll.registry().deregister(&mut stdout_sourcefd)?;
+        token_slab.free(tokens.stdout);
+
+        let mut stderr_sourcefd = SourceFd(&self.get_stderr_fd());
+        poll.registry().deregister(&mut stderr_sourcefd)?;
+        token_slab.free(tokens.stderr);
+
+        Ok(())
+    }
 }
 
 impl Drop for AppRuntime {
@@ -461,63 +495,15 @@ impl Drop for AppRuntime {
     }
 }
 
-fn poll_pid(pid: pid_t) -> Option<ReturnState> {
-    // Poll state
-    let mut status: i32 = 0;
-    let options: i32 = WNOHANG;
-    let ret = unsafe { waitpid(pid as libc::pid_t, &mut status, options) };
-    log::debug!("app: {} waitpid -> {} status: {}", pid, ret, status);
-
-    if ret == pid as libc::pid_t {
-        // children exited
-
-        let signaled = WIFSIGNALED(status);
-        if signaled {
-            let termsig = WTERMSIG(status);
-            log::info!(
-                "app {} terminated by signal {} ({})",
-                pid,
-                signal_name(termsig as usize).unwrap_or("UNKNOWN"),
-                termsig
-            );
-        }
-
-        // parse status
-        let normal = WIFEXITED(status);
-        let return_state = match normal {
-            true => ReturnState::Completed {
-                ret: WEXITSTATUS(status),
-            },
-            false => ReturnState::Abnormal,
-        };
-        log::info!("app {} returned {:?}", pid, return_state);
-        Some(return_state)
-    } else if ret == 0 {
-        // waiting
-        None
-    } else {
-        panic!("waitpid failed")
-    }
-}
-
 #[derive(Debug)]
-pub enum State {
-    Running(AppRuntime),
+enum State {
+    Running(AppRuntime, AppRtTokens),
     Terminated(ReturnState),
 }
 
 impl State {
-
     fn as_runtime(&self) -> Option<&AppRuntime> {
-        if let State::Running(rt) = self {
-            Some(rt)
-        } else {
-            None
-        }
-    }
-
-    fn as_runtime_mut(&mut self) -> Option<&mut AppRuntime> {
-        if let State::Running(rt) = self {
+        if let State::Running(rt, _tokens) = self {
             Some(rt)
         } else {
             None
@@ -525,7 +511,7 @@ impl State {
     }
 
     fn is_running(&self) -> bool {
-        matches!(self, State::Running(_))
+        matches!(self, State::Running(..))
     }
 }
 

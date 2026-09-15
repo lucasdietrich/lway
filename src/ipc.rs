@@ -72,7 +72,6 @@ impl Connection {
 pub struct Server {
     listener: UnixListener,
     connections: HashMap<Token, Connection>,
-    next_token_id: usize,
     max_connections: usize,
 }
 
@@ -92,7 +91,6 @@ impl Server {
         Ok(Server {
             listener,
             connections: HashMap::new(),
-            next_token_id: 0,
             max_connections,
         })
     }

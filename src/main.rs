@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use mio::{unix::SourceFd, Events, Poll, Token};
@@ -172,7 +172,7 @@ fn main() {
             cgroup: app_cfg.cgroup,
         };
 
-        let app = App::start(params, &mut poll, &mut rt.mio_token_slab).expect("run_app");
+        let app = App::new(params, &poll, &mut rt.mio_token_slab).expect("run_app");
         rt.apps.push(app);
     }
 
@@ -246,7 +246,14 @@ fn main() {
 
             // Create the equivalent is_known() for applications
             for app in rt.apps.iter_mut() {
-                app.poll(&poll, &mut rt.mio_token_slab, token, event, &logger, !rt.stopping)
+                app.poll(
+                    &poll,
+                    &mut rt.mio_token_slab,
+                    token,
+                    event,
+                    &logger,
+                    !rt.stopping,
+                )
             }
         }
 
