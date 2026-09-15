@@ -7,7 +7,11 @@ use crate::{
     cgroups::init_main_cgroup,
     config::GlobalConfig,
     runtime::App,
-    support::{mio_token_slab::MioTokenSlab, signal::handle_signal_fd},
+    support::{
+        mio_token_slab::MioTokenSlab,
+        signal::handle_signal_fd,
+        uidgid::{get_current_cwd, get_current_gid, get_current_uid},
+    },
 };
 
 pub mod cgroups;
@@ -151,8 +155,13 @@ fn main() {
     let mut poll = Poll::new().expect("create mio poll");
 
     for app_cfg in apps.into_iter() {
-        let uid = app_cfg.resolved_uid();
-        let gid = app_cfg.resolved_gid();
+        let cwd = app_cfg
+            .workdir
+            .clone()
+            .map(|p| PathBuf::from(p))
+            .unwrap_or_else(|| get_current_cwd().expect("get current cwd"));
+        let uid = app_cfg.resolved_uid().unwrap_or_else(get_current_uid);
+        let gid = app_cfg.resolved_gid().unwrap_or_else(get_current_gid);
 
         log::info!("Starting {}", app_cfg.command);
         let parts: Vec<String> = app_cfg.command.split(' ').map(|s| s.to_string()).collect();
@@ -169,7 +178,7 @@ fn main() {
             .unwrap_or_else(Vec::new);
 
         let params = runtime::AppParams {
-            cwd: app_cfg.workdir,
+            cwd,
             name,
             prog: parts[0].clone(),
             args: parts,

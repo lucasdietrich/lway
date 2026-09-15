@@ -270,7 +270,7 @@ fn app_info(app: &App) -> AppInfo {
         state: app.status_string(),
         pid: app.pid(),
         command: app.command(),
-        cwd: app.cwd().map(str::to_string),
+        cwd: app.cwd().display().to_string(),
         uid: app.uid(),
         gid: app.gid(),
         restart_count: stats.restart_count,

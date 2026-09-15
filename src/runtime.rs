@@ -1,10 +1,5 @@
 use std::{
-    ffi::{c_int, CString},
-    fmt::Display,
-    io::{self, Error, Read},
-    os::fd::{AsRawFd, RawFd},
-    str::FromStr,
-    time::{Duration, Instant},
+    ffi::{CString, c_int}, fmt::Display, io::{self, Error, Read}, os::fd::{AsRawFd, RawFd}, path::{Path, PathBuf}, str::FromStr, time::{Duration, Instant},
 };
 
 use cgroups_rs::fs::Cgroup;
@@ -16,14 +11,8 @@ use mio::unix::SourceFd;
 use thiserror::Error;
 
 use crate::{
-    cgroups::{init_app_cgroup, read_cgroup_usage, AppCgroupConfig, CgroupUsage},
-    logger::Logger,
-    stats::AppStats,
-    support::{
-        mio_token_slab::MioTokenSlab,
-        pipe::{Pipe, PipeReader},
-        signal::signal_name,
-        to_ioresult,
+    cgroups::{AppCgroupConfig, CgroupUsage, init_app_cgroup, read_cgroup_usage}, logger::Logger, stats::AppStats, support::{
+        mio_token_slab::MioTokenSlab, pipe::{Pipe, PipeReader}, signal::signal_name, to_ioresult, uidgid::set_current_cwd,
     },
 };
 
@@ -38,12 +27,12 @@ pub enum AppErr {
 // remake <'a>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppParams {
-    pub cwd: Option<String>,
+    pub cwd: PathBuf,
     pub name: String,
     pub prog: String,
     pub args: Vec<String>,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
+    pub uid: u32,
+    pub gid: u32,
     pub env: Vec<String>,
     pub oneshot: bool,
     pub cgroup: AppCgroupConfig,
@@ -113,16 +102,16 @@ impl App {
         self.params.oneshot
     }
 
-    pub fn uid(&self) -> Option<u32> {
+    pub fn uid(&self) -> u32 {
         self.params.uid
     }
 
-    pub fn gid(&self) -> Option<u32> {
+    pub fn gid(&self) -> u32 {
         self.params.gid
     }
 
-    pub fn cwd(&self) -> Option<&str> {
-        self.params.cwd.as_deref()
+    pub fn cwd(&self) -> &Path {
+        &self.params.cwd
     }
 
     /// Full command line (program + args) as it was launched.
@@ -423,23 +412,19 @@ impl AppRuntime {
 
             // setgid must happen before setuid: once uid is dropped, permission to
             // change gid is lost.
-            if let Some(gid) = params.gid {
-                log::info!("Setting gid to {}", gid);
-                let ret = unsafe { libc::setgid(gid) };
-                to_ioresult(ret).map_err(|e| {
-                    log::error!("setgid failed: {}", e);
-                    AppRuntimeError::Io(e)
-                })?;
-            }
+            log::info!("Setting gid: {} uid: {}", params.gid, params.uid);
 
-            if let Some(uid) = params.uid {
-                log::info!("Setting uid to {}", uid);
-                let ret = unsafe { libc::setuid(uid) };
-                to_ioresult(ret).map_err(|e| {
-                    log::error!("setuid failed: {}", e);
-                    AppRuntimeError::Io(e)
-                })?;
-            }
+            let ret = unsafe { libc::setgid(params.gid) };
+            to_ioresult(ret).map_err(|e| {
+                log::error!("setgid failed: {}", e);
+                AppRuntimeError::Io(e)
+            })?;
+
+            let ret = unsafe { libc::setuid(params.uid) };
+            to_ioresult(ret).map_err(|e| {
+                log::error!("setuid failed: {}", e);
+                AppRuntimeError::Io(e)
+            })?;
 
             // Build environment variables
             let env: Vec<CString> = params
@@ -454,15 +439,11 @@ impl AppRuntime {
             envp.push(std::ptr::null());
 
             // Set working directory if specified
-            if let Some(cwd) = &params.cwd {
-                log::info!("Changing working directory to {}", cwd);
-                let cwd_cstr = CString::from_str(cwd).expect("cwd");
-                let ret = unsafe { libc::chdir(cwd_cstr.as_ptr()) };
-                to_ioresult(ret).map_err(|e| {
-                    log::error!("chdir failed: {}", e);
-                    AppRuntimeError::Io(e)
-                })?;
-            }
+            log::info!("Changing working directory to {}", params.cwd.display());
+            set_current_cwd(&params.cwd).map_err(|e| {
+                log::error!("chdir failed: {}", e);
+                AppRuntimeError::Io(e)
+            })?;
 
             let ret = unsafe {
                 libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())

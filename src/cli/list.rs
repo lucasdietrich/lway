@@ -69,7 +69,7 @@ pub fn print_apps_table(apps: &[AppInfo]) {
                 app.state.clone(),
                 app.pid.map(|p| p.to_string()).unwrap_or_else(dash),
                 app.command.clone(),
-                app.cwd.clone().unwrap_or_else(dash),
+                app.cwd.clone(),
                 format_id(app.uid, get_username),
                 format_id(app.gid, get_groupname),
                 app.restart_count.to_string(),
@@ -110,12 +110,9 @@ pub fn print_apps_table(apps: &[AppInfo]) {
 }
 
 /// Formats a uid/gid as `"1000 (name)"`, falling back to the bare id or `"-"`.
-fn format_id(id: Option<u32>, resolve_name: impl Fn(u32) -> Option<String>) -> String {
-    match id {
-        Some(id) => match resolve_name(id) {
-            Some(name) => format!("{} ({})", id, name),
-            None => id.to_string(),
-        },
-        None => "-".to_string(),
+fn format_id(id: u32, resolve_name: impl Fn(u32) -> Option<String>) -> String {
+    match resolve_name(id) {
+        Some(name) => format!("{} ({})", name, id),
+        None => id.to_string(),
     }
 }
