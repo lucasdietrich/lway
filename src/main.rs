@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use mio::{unix::SourceFd, Events, Poll, Token};
 
 use crate::{
@@ -101,7 +101,8 @@ fn main() {
 
     if !cli.daemon {
         let command = cli.command.unwrap_or_else(|| {
-            eprintln!("no command given, use --help");
+            Cli::command().print_help().expect("print help");
+            println!();
             std::process::exit(1);
         });
         match command {
