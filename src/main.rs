@@ -29,8 +29,8 @@ const SIGINT_LIMIT: usize = 2;
 
 pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 pub const SIGNALFD_TOKEN: Token = Token(1);
-pub const MAX_MIO_TOKENS: usize = 128;
 pub const RESERVED_MIO_TOKENS: usize = 2;
+pub const MAX_MIO_TOKENS: usize = 128;
 
 /// lway - a tiny process supervisor
 #[derive(Parser, Debug)]
@@ -196,7 +196,7 @@ fn main() {
         )
         .expect("register signal fd");
 
-    let mut events = Events::with_capacity(128);
+    let mut events = Events::with_capacity(MAX_MIO_TOKENS);
 
     loop {
         // Doubles as the supervisor's ~1s poll tick: app health/output is
