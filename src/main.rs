@@ -100,11 +100,9 @@ fn main() {
     }
 
     let log_level = match cli.verbose {
-        0 => log::LevelFilter::Off,
-        1 => log::LevelFilter::Error,
-        2 => log::LevelFilter::Warn,
-        3 => log::LevelFilter::Info,
-        4 => log::LevelFilter::Debug,
+        0 => log::LevelFilter::Warn,
+        1 => log::LevelFilter::Info,
+        2 => log::LevelFilter::Debug,
         _ => log::LevelFilter::Trace,
     };
 
