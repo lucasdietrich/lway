@@ -1,4 +1,6 @@
+pub mod mio_token_slab;
 pub mod pid;
+pub mod pipe;
 pub mod signal;
 pub mod uidgid;
 

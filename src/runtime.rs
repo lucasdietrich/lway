@@ -17,9 +17,12 @@ use thiserror::Error;
 use crate::{
     cgroups::{init_app_cgroup, AppCgroupConfig},
     logger::Logger,
-    mio_token_slab::MioTokenSlab,
-    pipe::{Pipe, PipeReader},
-    support::{signal::signal_name, to_ioresult},
+    support::{
+        mio_token_slab::MioTokenSlab,
+        pipe::{Pipe, PipeReader},
+        signal::signal_name,
+        to_ioresult,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -450,7 +453,11 @@ impl AppRuntime {
         }
     }
 
-    fn stop(mut self, poll: &mio::Poll, token_slab: &mut MioTokenSlab) -> Result<(), AppRuntimeError> {
+    fn stop(
+        mut self,
+        poll: &mio::Poll,
+        token_slab: &mut MioTokenSlab,
+    ) -> Result<(), AppRuntimeError> {
         let mut pidfd_sourcefd = SourceFd(&self.pidfd);
         poll.registry().deregister(&mut pidfd_sourcefd)?;
         token_slab.free(self.tokens.pidfd);

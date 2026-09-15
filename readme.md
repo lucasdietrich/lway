@@ -4,7 +4,7 @@
 - [x] allow to add env vars
 - [ ] setsid
 - [x] cwd
-- [ ] user/group support
+- [x] user/group support
 - [ ] CLI:
     - [ ] create workspace: https://claude.ai/chat/e6d0b828-962c-43c3-8804-592927e3ed5b
     - [x] cli: clap

@@ -4,17 +4,18 @@ use clap::{Parser, Subcommand};
 use mio::{unix::SourceFd, Events, Poll, Token};
 
 use crate::{
-    cgroups::init_main_cgroup, config::GlobalConfig, mio_token_slab::MioTokenSlab, runtime::App,
-    support::signal::handle_signal_fd,
+    cgroups::init_main_cgroup,
+    config::GlobalConfig,
+    runtime::App,
+    support::{mio_token_slab::MioTokenSlab, signal::handle_signal_fd},
 };
 
 pub mod cgroups;
+pub mod cli;
 pub mod config;
 pub mod ipc;
 pub mod logger;
-pub mod mio_token_slab;
 pub mod parser;
-pub mod pipe;
 pub mod protocol;
 pub mod runtime;
 pub mod support;
@@ -286,8 +287,8 @@ fn main() {
 
 /// Connects to a running daemon, requests the app list and prints it as a table.
 fn run_list_client(socket_path: &PathBuf) {
-    match ipc::list_apps(socket_path) {
-        Ok(apps) => ipc::print_apps_table(&apps),
+    match cli::list::list_apps(socket_path) {
+        Ok(apps) => cli::list::print_apps_table(&apps),
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);

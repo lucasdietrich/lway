@@ -5,9 +5,9 @@
 //! Every request currently supported (`Request::List`) is one-shot, so a
 //! connection is closed as soon as its response has been fully flushed.
 //!
-//! The client side (`list_apps`) is a short-lived process making a single
-//! blocking connection, so it uses `std::os::unix::net::UnixStream` directly
-//! instead of `mio` -- there is no need for an event loop there.
+//! The client side (see `crate::cli`) is a short-lived process making a
+//! single blocking connection, so it uses `std::os::unix::net::UnixStream`
+//! directly instead of `mio` -- there is no need for an event loop there.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
@@ -17,9 +17,9 @@ use mio::net::{UnixListener, UnixStream};
 use mio::{Interest, Poll, Token};
 use thiserror::Error;
 
-use crate::mio_token_slab::MioTokenSlab;
 use crate::protocol::{AppInfo, Request, Response};
 use crate::runtime::App;
+use crate::support::mio_token_slab::MioTokenSlab;
 use crate::UNIX_LISTENER_TOKEN;
 
 /// Cap on concurrent control-socket connections; see `Server::bind`.
@@ -259,75 +259,5 @@ fn app_info(app: &App) -> AppInfo {
         oneshot: app.is_oneshot(),
         cpu_weight: cgroup.cpu_weight,
         io_weight: cgroup.io_weight,
-    }
-}
-
-/// Connects to the daemon's control socket, sends a `List` request and
-/// returns the reported apps. Blocking: this is a short-lived one-shot call.
-pub fn list_apps(socket_path: &Path) -> Result<Vec<AppInfo>> {
-    use std::io::BufRead;
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|_| IpcError::NotRunning(socket_path.to_path_buf()))?;
-
-    let mut request = serde_json::to_string(&Request::List)?;
-    request.push('\n');
-    stream.write_all(request.as_bytes())?;
-
-    let mut reader = io::BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    if line.trim().is_empty() {
-        return Err(IpcError::Io(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "daemon closed the connection without responding",
-        )));
-    }
-
-    match serde_json::from_str::<Response>(line.trim())? {
-        Response::AppList { apps } => Ok(apps),
-        Response::Error { message } => Err(IpcError::Daemon(message)),
-    }
-}
-
-/// Prints `apps` as a simple column-aligned table.
-pub fn print_apps_table(apps: &[AppInfo]) {
-    const HEADERS: [&str; 6] = ["NAME", "PID", "STATE", "ONESHOT", "CPU_WEIGHT", "IO_WEIGHT"];
-
-    let dash = || "-".to_string();
-    let rows: Vec<[String; 6]> = apps
-        .iter()
-        .map(|app| {
-            [
-                app.name.clone(),
-                app.pid.map(|p| p.to_string()).unwrap_or_else(dash),
-                app.state.clone(),
-                app.oneshot.to_string(),
-                app.cpu_weight.map(|w| w.to_string()).unwrap_or_else(dash),
-                app.io_weight.map(|w| w.to_string()).unwrap_or_else(dash),
-            ]
-        })
-        .collect();
-
-    let mut widths = HEADERS.map(str::len);
-    for row in &rows {
-        for (width, cell) in widths.iter_mut().zip(row.iter()) {
-            *width = (*width).max(cell.len());
-        }
-    }
-
-    let print_row = |cells: &[String; 6]| {
-        let line: Vec<String> = cells
-            .iter()
-            .zip(widths.iter())
-            .map(|(cell, width)| format!("{:<width$}", cell, width = width))
-            .collect();
-        println!("{}", line.join("  ").trim_end());
-    };
-
-    print_row(&HEADERS.map(String::from));
-    for row in &rows {
-        print_row(row);
     }
 }
