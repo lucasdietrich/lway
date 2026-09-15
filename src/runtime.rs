@@ -65,27 +65,13 @@ impl App {
         poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
     ) -> Result<Self, AppErr> {
-        let (runtime, tokens) = Self::start(&params, &poll, token_slab)?;
+        let runtime = AppRuntime::start(&params, &poll, token_slab)?;
 
         Ok(App {
             name: params.name.to_string(),
-            state: State::Running(runtime, tokens),
+            state: State::Running(runtime),
             params,
         })
-    }
-
-    fn start(
-        params: &AppParams,
-        poll: &mio::Poll,
-        token_slab: &mut MioTokenSlab,
-    ) -> Result<(AppRuntime, AppRtTokens), AppErr> {
-        let runtime = AppRuntime::new(params)?;
-
-        log::info!("App {} started with pid: {}", &params.name, runtime.pid);
-
-        let tokens = runtime.poll_register(poll, token_slab)?;
-
-        Ok((runtime, tokens))
     }
 
     pub fn name(&self) -> &str {
@@ -121,14 +107,14 @@ impl App {
         logger: &dyn Logger,
         try_restart: bool,
     ) {
-        let State::Running(rt, tokens) = &mut self.state else {
+        let State::Running(rt) = &mut self.state else {
             return;
         };
 
         // logging: Read stdout and stderr
         let mut buf = vec![0u8; 1024];
 
-        if token == tokens.stdout {
+        if token == rt.tokens.stdout {
             if event.is_readable() {
                 if let Ok(rcvd) = rt.stdout.read(&mut buf) {
                     log::debug!("app {} rcvd {} bytes from stdout", rt.pid, rcvd);
@@ -149,7 +135,7 @@ impl App {
             }
         }
 
-        if token == tokens.stderr {
+        if token == rt.tokens.stderr {
             if event.is_readable() {
                 if let Ok(rcvd) = rt.stderr.read(&mut buf) {
                     log::debug!("app {} rcvd {} bytes from stderr", rt.pid, rcvd);
@@ -171,17 +157,16 @@ impl App {
         }
 
         // handle process termination
-        if token == tokens.pidfd && event.is_readable() {
+        if token == rt.tokens.pidfd && event.is_readable() {
             if let Some(return_state) = poll_pid(rt.pid) {
                 {
                     let terminated = State::Terminated(return_state);
-                    let State::Running(rt, tokens) = std::mem::replace(&mut self.state, terminated)
-                    else {
+                    let State::Running(rt) = std::mem::replace(&mut self.state, terminated) else {
                         unreachable!();
                     };
 
-                    rt.poll_deregister(poll, token_slab, tokens)
-                        .expect("Failed to deregister app runtime");
+                    rt.stop(poll, token_slab)
+                        .expect("Failed to stop app runtime");
 
                     self.state = State::Terminated(return_state);
 
@@ -190,8 +175,8 @@ impl App {
 
                 // evaluate the restart of the application
                 if try_restart && !self.params.oneshot {
-                    match Self::start(&self.params, &poll, token_slab) {
-                        Ok((runtime, tokens)) => self.state = State::Running(runtime, tokens),
+                    match AppRuntime::start(&self.params, &poll, token_slab) {
+                        Ok(runtime) => self.state = State::Running(runtime),
                         Err(err) => log::error!("Failed to restart app {}: {}", self.name, err),
                     }
                 }
@@ -276,6 +261,8 @@ pub enum AppRuntimeError {
     ExecvFailed(Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Token allocation failed")]
+    TokenAllocation,
 }
 
 #[derive(Debug)]
@@ -285,10 +272,18 @@ struct AppRuntime {
     stdout: PipeReader,
     stderr: PipeReader,
     pidfd: RawFd,
+    tokens: AppRtTokens,
+
+    /// Indicates whether AppRuntime::stop was called before the runtime was dropped
+    proper_cleanup: bool,
 }
 
 impl AppRuntime {
-    fn new(params: &AppParams) -> Result<Self, AppRuntimeError> {
+    fn start(
+        params: &AppParams,
+        poll: &mio::Poll,
+        token_slab: &mut MioTokenSlab,
+    ) -> Result<Self, AppRuntimeError> {
         let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
 
@@ -391,20 +386,80 @@ impl AppRuntime {
                 AppRuntimeError::Io(e)
             })?;
 
+            let stdout = pipe_stdout
+                .into_nonblocking_read_fd()
+                .expect("nonblocking stdout");
+            let stderr = pipe_stderr
+                .into_nonblocking_read_fd()
+                .expect("nonblocking stderr");
+
+            let mut pidfd_sourcefd = SourceFd(&pidfd);
+            let pidfd_token = token_slab
+                .allocate()
+                .ok_or(AppRuntimeError::TokenAllocation)?;
+            poll.registry()
+                .register(&mut pidfd_sourcefd, pidfd_token, mio::Interest::READABLE)?;
+
+            let stdout_token = token_slab
+                .allocate()
+                .ok_or(AppRuntimeError::TokenAllocation)?;
+            let mut stdout_sourcefd = SourceFd(&stdout.as_raw_fd());
+            poll.registry().register(
+                &mut stdout_sourcefd,
+                stdout_token,
+                mio::Interest::READABLE,
+            )?;
+
+            let stderr_token = token_slab
+                .allocate()
+                .ok_or(AppRuntimeError::TokenAllocation)?;
+            let mut stderr_sourcefd = SourceFd(&stderr.as_raw_fd());
+            poll.registry().register(
+                &mut stderr_sourcefd,
+                stderr_token,
+                mio::Interest::READABLE,
+            )?;
+
             Ok(AppRuntime {
                 pid,
                 cgroup,
-                stdout: pipe_stdout
-                    .into_nonblocking_read_fd()
-                    .expect("nonblocking stdout"),
-                stderr: pipe_stderr
-                    .into_nonblocking_read_fd()
-                    .expect("nonblocking stderr"),
+                stdout,
+                stderr,
                 pidfd,
+                tokens: AppRtTokens {
+                    pidfd: pidfd_token,
+                    stdout: stdout_token,
+                    stderr: stderr_token,
+                },
+                proper_cleanup: false,
             })
         } else {
             Err(AppRuntimeError::ForkFailed(ret))
         }
+    }
+
+    fn stop(mut self, poll: &mio::Poll, token_slab: &mut MioTokenSlab) -> Result<(), AppRuntimeError> {
+        let mut pidfd_sourcefd = SourceFd(&self.pidfd);
+        poll.registry().deregister(&mut pidfd_sourcefd)?;
+        token_slab.free(self.tokens.pidfd);
+
+        let mut stdout_sourcefd = SourceFd(&self.stdout.as_raw_fd());
+        poll.registry().deregister(&mut stdout_sourcefd)?;
+        token_slab.free(self.tokens.stdout);
+
+        let mut stderr_sourcefd = SourceFd(&self.stderr.as_raw_fd());
+        poll.registry().deregister(&mut stderr_sourcefd)?;
+        token_slab.free(self.tokens.stderr);
+
+        // pipe fds are automatically closed
+
+        if let Err(err) = self.cgroup.delete() {
+            log::error!("Failed to delete app cgroup: {}", err);
+        }
+
+        self.proper_cleanup = true;
+
+        Ok(())
     }
 
     pub fn send_sigterm(&self) -> io::Result<()> {
@@ -423,87 +478,25 @@ impl AppRuntime {
 
         Ok(())
     }
-
-    pub fn get_pidfd(&self) -> RawFd {
-        self.pidfd
-    }
-
-    pub fn get_stdout_fd(&self) -> RawFd {
-        self.stdout.as_raw_fd()
-    }
-
-    pub fn get_stderr_fd(&self) -> RawFd {
-        self.stderr.as_raw_fd()
-    }
-
-    fn poll_register(
-        &self,
-        poll: &mio::Poll,
-        token_slab: &mut MioTokenSlab,
-    ) -> Result<AppRtTokens, AppErr> {
-        let mut pidfd_sourcefd = SourceFd(&self.get_pidfd());
-        let pidfd_token = token_slab.allocate().ok_or(AppErr::TokenAllocation)?;
-        poll.registry()
-            .register(&mut pidfd_sourcefd, pidfd_token, mio::Interest::READABLE)?;
-
-        let stdout_token = token_slab.allocate().ok_or(AppErr::TokenAllocation)?;
-        let mut stdout_sourcefd = SourceFd(&self.get_stdout_fd());
-        poll.registry()
-            .register(&mut stdout_sourcefd, stdout_token, mio::Interest::READABLE)?;
-
-        let stderr_token = token_slab.allocate().ok_or(AppErr::TokenAllocation)?;
-        let mut stderr_sourcefd = SourceFd(&self.get_stderr_fd());
-        poll.registry()
-            .register(&mut stderr_sourcefd, stderr_token, mio::Interest::READABLE)?;
-
-        Ok(AppRtTokens {
-            pidfd: pidfd_token,
-            stdout: stdout_token,
-            stderr: stderr_token,
-        })
-    }
-
-    fn poll_deregister(
-        &self,
-        poll: &mio::Poll,
-        token_slab: &mut MioTokenSlab,
-        tokens: AppRtTokens,
-    ) -> Result<(), AppErr> {
-        let mut pidfd_sourcefd = SourceFd(&self.get_pidfd());
-        poll.registry().deregister(&mut pidfd_sourcefd)?;
-        token_slab.free(tokens.pidfd);
-
-        let mut stdout_sourcefd = SourceFd(&self.get_stdout_fd());
-        poll.registry().deregister(&mut stdout_sourcefd)?;
-        token_slab.free(tokens.stdout);
-
-        let mut stderr_sourcefd = SourceFd(&self.get_stderr_fd());
-        poll.registry().deregister(&mut stderr_sourcefd)?;
-        token_slab.free(tokens.stderr);
-
-        Ok(())
-    }
 }
 
 impl Drop for AppRuntime {
     fn drop(&mut self) {
-        // pipe fds are automatically closed
-
-        if let Err(err) = self.cgroup.delete() {
-            log::error!("Failed to delete app cgroup: {}", err);
+        if !self.proper_cleanup {
+            panic!("AppRuntime dropped without proper cleanup");
         }
     }
 }
 
 #[derive(Debug)]
 enum State {
-    Running(AppRuntime, AppRtTokens),
+    Running(AppRuntime),
     Terminated(ReturnState),
 }
 
 impl State {
     fn as_runtime(&self) -> Option<&AppRuntime> {
-        if let State::Running(rt, _tokens) = self {
+        if let State::Running(rt) = self {
             Some(rt)
         } else {
             None
