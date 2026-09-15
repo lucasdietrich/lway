@@ -9,7 +9,7 @@
     - [ ] create workspace: https://claude.ai/chat/e6d0b828-962c-43c3-8804-592927e3ed5b
     - [x] cli: clap
         - [x] list apps
-            - [ ] more infos: uid,gid,cwd,restart count, logs count, restart stats, usage (cpu, mem, io)
+            - [x] more infos: uid,gid,cwd,restart count, logs count, restart stats, usage (cpu, mem, io)
         - [ ] start/stop/restart/status/stats
         - [ ] cgroup control
     - [x] protocol: json + serde
@@ -32,3 +32,5 @@
     - [ ] exponential backoff for restart
     - [ ] restart on failure/success
     - [ ] consecutive failures threshold for deactivation
+- [ ] improve handling of immediate failures:
+    - [ ] command fails at start immediately

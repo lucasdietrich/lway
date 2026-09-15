@@ -82,9 +82,9 @@ pub fn handle_signal_fd(signal_fd: &RawFd) -> libc::c_int {
         let siginfo = unsafe { siginfo.assume_init() };
         let signo = siginfo.ssi_signo as usize;
         if let Some(name) = signal_name(signo) {
-            println!("Received signal: {} ({})", name, signo);
+            log::info!("Received signal: {} ({})", name, signo);
         } else {
-            println!("Received unknown signal: {}", signo);
+            log::warn!("Received unknown signal: {}", signo);
         }
 
         signo as c_int

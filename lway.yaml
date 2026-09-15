@@ -20,6 +20,10 @@ apps:
     workdir: /tmp
     env:
       MYVAR1: value1
+  - name: write1
+    command: /var/amy/writer /var/amy/f1.txt -s 64
+  - name: write2
+    command: /var/amy/writer /var/amy/f2.txt -s 128
 
 
 

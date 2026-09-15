@@ -1,4 +1,7 @@
+use cgroups_rs::fs::blkio::BlkIoController;
 use cgroups_rs::fs::cgroup_builder::*;
+use cgroups_rs::fs::cpu::CpuController;
+use cgroups_rs::fs::memory::MemController;
 use cgroups_rs::{fs::*, CgroupPid};
 use serde::Deserialize;
 
@@ -70,4 +73,57 @@ pub fn init_app_cgroup(name: &str, pid: libc::pid_t, config: &AppCgroupConfig) -
         .expect("Failed to add task to app cgroup");
 
     app
+}
+
+/// Point-in-time resource usage read from a cgroup's controllers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CgroupUsage {
+    pub cpu_usage_usec: u64,
+    pub memory_current: u64,
+    pub memory_peak: u64,
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
+}
+
+/// Best-effort snapshot of `cgroup`'s resource usage; missing controllers report 0.
+/// Assumes a cgroup v2 (unified) hierarchy.
+pub fn read_cgroup_usage(cgroup: &Cgroup) -> CgroupUsage {
+    let cpu_usage_usec = cgroup
+        .controller_of::<CpuController>()
+        .map(|c| parse_cpu_stat_usec(&c.cpu().stat))
+        .unwrap_or(0);
+
+    let (memory_current, memory_peak) = cgroup
+        .controller_of::<MemController>()
+        .map(|c| {
+            let mem = c.memory_stat();
+            (mem.usage_in_bytes, mem.max_usage_in_bytes)
+        })
+        .unwrap_or((0, 0));
+
+    let (io_read_bytes, io_write_bytes) = cgroup
+        .controller_of::<BlkIoController>()
+        .map(|c| {
+            // cgroup v2: io.stat
+            c.blkio()
+                .io_stat
+                .iter()
+                .fold((0, 0), |(r, w), s| (r + s.rbytes, w + s.wbytes))
+        })
+        .unwrap_or((0, 0));
+
+    CgroupUsage {
+        cpu_usage_usec,
+        memory_current,
+        memory_peak,
+        io_read_bytes,
+        io_write_bytes,
+    }
+}
+
+fn parse_cpu_stat_usec(stat: &str) -> u64 {
+    stat.lines()
+        .find_map(|line| line.strip_prefix("usage_usec "))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
 }

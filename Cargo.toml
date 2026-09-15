@@ -7,18 +7,22 @@ edition = "2021"
 default = []
 
 [dependencies]
+thiserror = "2.0"
+slab = "0.4.12"
 libc = "0.2.180"
-thiserror = "2.0.18"
-clap = { version = "4", features = ["derive"] }
+mio = { version = "0.8", features = ["os-poll", "net", "os-ext"] }
 
+# cgroups-rs = "0.5.1"
+# pending PR https://github.com/kata-containers/cgroups-rs/pull/178
+cgroups-rs = { git = "https://github.com/lucasdietrich/cgroups-rs.git", rev = "30b048edc819c70e9952cfb7efd09edaa85077a4"}
+
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
+
 log = "0.4.29"
 simple_logger = "5.1.0"
-cgroups-rs = "0.5.1"
-mio = { version = "0.8", features = ["os-poll", "net", "os-ext"] }
-slab = "0.4.12"
 
 [dev-dependencies]
 
@@ -27,8 +31,9 @@ slab = "0.4.12"
 # read https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]
 panic = "abort"
+# strip = "none"
 # codegen-units = 1      # better optimizations
-# debug = true
+debug = false
 # opt-level = 1
 # overflow-checks = true
 # lto = false
@@ -41,3 +46,5 @@ opt-level = "z"         # optimize for binary size
 overflow-checks = false
 lto = "fat"
 
+# [patch.crates-io]
+# cgroups-rs = { path = "/home/lucas/Projects/Embedded/cgroups-rs" }

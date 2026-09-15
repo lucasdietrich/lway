@@ -18,6 +18,7 @@ pub mod logger;
 pub mod parser;
 pub mod protocol;
 pub mod runtime;
+pub mod stats;
 pub mod support;
 
 const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
@@ -61,6 +62,11 @@ struct Cli {
 enum Command {
     /// List apps supervised by the running daemon
     List,
+    /// Show runtime statistics for a single app
+    Stats {
+        /// Name of the app to query
+        name: String,
+    },
 }
 
 pub struct Runtime {
@@ -96,6 +102,7 @@ fn main() {
         });
         match command {
             Command::List => run_list_client(&socket_path),
+            Command::Stats { name } => run_stats_client(&socket_path, &name),
         }
         return;
     }
@@ -289,6 +296,17 @@ fn main() {
 fn run_list_client(socket_path: &PathBuf) {
     match cli::list::list_apps(socket_path) {
         Ok(apps) => cli::list::print_apps_table(&apps),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Connects to a running daemon, requests an app's stats and prints them.
+fn run_stats_client(socket_path: &PathBuf, name: &str) {
+    match cli::stats::get_stats(socket_path, name) {
+        Ok(stats) => cli::stats::print_stats(name, &stats),
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);

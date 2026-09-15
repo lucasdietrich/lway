@@ -39,6 +39,9 @@ deploy-config:
 deploy: build deploy-config
   scp {{exe}} {{target}}:~/
 
+deploy-release: release deploy-config
+  scp target/aarch64-unknown-linux-gnu/release/lway {{target}}:~/
+
 app:
   . ./.env && bear -- $CC apps/app.c -o apps/app
   ssh {{target}} "mkdir -p /var/amy"
@@ -48,3 +51,8 @@ ctest: deploy-config
   . ./.env && bear -- $CC apps/test.c -o apps/test
   ssh {{target}} "mkdir -p /var/amy"
   scp apps/test {{target}}:/var/amy/
+
+writer:
+  . ./.env && bear -- $CC apps/writer.c -o apps/writer
+  ssh {{target}} "mkdir -p /var/amy"
+  scp apps/writer {{target}}:/var/amy/

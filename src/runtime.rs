@@ -4,6 +4,7 @@ use std::{
     io::{self, Error, Read},
     os::fd::{AsRawFd, RawFd},
     str::FromStr,
+    time::{Duration, Instant},
 };
 
 use cgroups_rs::fs::Cgroup;
@@ -15,8 +16,9 @@ use mio::unix::SourceFd;
 use thiserror::Error;
 
 use crate::{
-    cgroups::{init_app_cgroup, AppCgroupConfig},
+    cgroups::{init_app_cgroup, read_cgroup_usage, AppCgroupConfig, CgroupUsage},
     logger::Logger,
+    stats::AppStats,
     support::{
         mio_token_slab::MioTokenSlab,
         pipe::{Pipe, PipeReader},
@@ -24,6 +26,8 @@ use crate::{
         to_ioresult,
     },
 };
+
+const STDIO_BUFFER_SIZE: usize = 4096;
 
 #[derive(Debug, Error)]
 pub enum AppErr {
@@ -52,10 +56,22 @@ struct AppRtTokens {
     pub stderr: mio::Token,
 }
 
+#[derive(Debug, Default)]
+struct AppRuntimeStats {
+    restart_count: u32,
+    last_exit_code: Option<i32>,
+    last_exit_reason: Option<String>,
+    stdout_bytes: u64,
+    stderr_bytes: u64,
+    /// Sum of the durations of all completed runs, excluding the current one.
+    total_uptime: Duration,
+}
+
 pub struct App {
     name: String,
     params: AppParams,
     state: State,
+    runtime_stats: AppRuntimeStats,
 }
 
 impl App {
@@ -70,6 +86,7 @@ impl App {
             name: params.name.to_string(),
             state: State::Running(runtime),
             params,
+            runtime_stats: AppRuntimeStats::default(),
         })
     }
 
@@ -85,7 +102,10 @@ impl App {
         match &self.state {
             State::Running(..) => "running".to_string(),
             State::Terminated(ReturnState::Completed { ret }) => format!("exited({})", ret),
-            State::Terminated(ReturnState::Abnormal) => "abnormal".to_string(),
+            State::Terminated(ReturnState::Abnormal { signal }) => format!(
+                "abnormal(signal {})",
+                signal_name(*signal as usize).unwrap_or("UNKNOWN")
+            ),
         }
     }
 
@@ -93,8 +113,47 @@ impl App {
         self.params.oneshot
     }
 
+    pub fn uid(&self) -> Option<u32> {
+        self.params.uid
+    }
+
+    pub fn gid(&self) -> Option<u32> {
+        self.params.gid
+    }
+
+    pub fn cwd(&self) -> Option<&str> {
+        self.params.cwd.as_deref()
+    }
+
+    /// Full command line (program + args) as it was launched.
+    pub fn command(&self) -> String {
+        self.params.args.join(" ")
+    }
+
     pub fn cgroup_config(&self) -> &AppCgroupConfig {
         &self.params.cgroup
+    }
+
+    pub fn stats(&self) -> AppStats {
+        let (uptime, cgroup_usage) = match &self.state {
+            State::Running(rt) => (Some(rt.started_at.elapsed()), read_cgroup_usage(&rt.cgroup)),
+            State::Terminated(..) => (None, CgroupUsage::default()),
+        };
+
+        AppStats {
+            uptime,
+            total_uptime: self.runtime_stats.total_uptime,
+            restart_count: self.runtime_stats.restart_count,
+            last_exit_code: self.runtime_stats.last_exit_code,
+            last_exit_reason: self.runtime_stats.last_exit_reason.clone(),
+            cpu_usage_usec: cgroup_usage.cpu_usage_usec,
+            memory_current: cgroup_usage.memory_current,
+            memory_peak: cgroup_usage.memory_peak,
+            io_read_bytes: cgroup_usage.io_read_bytes,
+            io_write_bytes: cgroup_usage.io_write_bytes,
+            stdout_bytes: self.runtime_stats.stdout_bytes,
+            stderr_bytes: self.runtime_stats.stderr_bytes,
+        }
     }
 
     pub fn poll(
@@ -111,12 +170,14 @@ impl App {
         };
 
         // logging: Read stdout and stderr
-        let mut buf = vec![0u8; 1024];
+        // TODO replace this buffer to mmap per AppRuntime to avoid reallocating each loop
+        let mut buf = vec![0u8; STDIO_BUFFER_SIZE];
 
         if token == rt.tokens.stdout {
             if event.is_readable() {
                 if let Ok(rcvd) = rt.stdout.read(&mut buf) {
                     log::debug!("app {} rcvd {} bytes from stdout", rt.pid, rcvd);
+                    self.runtime_stats.stdout_bytes += rcvd as u64;
                     logger
                         .log(&self.name, rt.pid, &buf[..rcvd])
                         .expect("log stdout");
@@ -138,6 +199,7 @@ impl App {
             if event.is_readable() {
                 if let Ok(rcvd) = rt.stderr.read(&mut buf) {
                     log::debug!("app {} rcvd {} bytes from stderr", rt.pid, rcvd);
+                    self.runtime_stats.stderr_bytes += rcvd as u64;
                     logger
                         .log(&self.name, rt.pid, &buf[..rcvd])
                         .expect("log stderr");
@@ -158,11 +220,26 @@ impl App {
         // handle process termination
         if token == rt.tokens.pidfd && event.is_readable() {
             if let Some(return_state) = poll_pid(rt.pid) {
+                self.runtime_stats.last_exit_code = match return_state {
+                    ReturnState::Completed { ret } => Some(ret),
+                    ReturnState::Abnormal { .. } => None,
+                };
+                self.runtime_stats.last_exit_reason = Some(match return_state {
+                    ReturnState::Completed { ret } => format!("exited({})", ret),
+                    ReturnState::Abnormal { signal } => format!(
+                        "signal {} ({})",
+                        signal_name(signal as usize).unwrap_or("UNKNOWN"),
+                        signal
+                    ),
+                });
+
                 {
                     let terminated = State::Terminated(return_state);
                     let State::Running(rt) = std::mem::replace(&mut self.state, terminated) else {
                         unreachable!();
                     };
+
+                    self.runtime_stats.total_uptime += rt.started_at.elapsed();
 
                     rt.stop(poll, token_slab)
                         .expect("Failed to stop app runtime");
@@ -175,7 +252,10 @@ impl App {
                 // evaluate the restart of the application
                 if try_restart && !self.params.oneshot {
                     match AppRuntime::start(&self.params, &poll, token_slab) {
-                        Ok(runtime) => self.state = State::Running(runtime),
+                        Ok(runtime) => {
+                            self.runtime_stats.restart_count += 1;
+                            self.state = State::Running(runtime);
+                        }
                         Err(err) => log::error!("Failed to restart app {}: {}", self.name, err),
                     }
                 }
@@ -210,7 +290,7 @@ impl Display for App {
 pub enum ReturnState {
     // Tell whether the process returned normally
     Completed { ret: i32 },
-    Abnormal, // Tell whether the process returned normally (call to exit or return from main)
+    Abnormal { signal: i32 }, // Terminated by a signal (call to exit or return from main)
 }
 
 /// Non-blocking check of a child's exit status via `waitpid(WNOHANG)`.
@@ -236,7 +316,7 @@ fn poll_pid(pid: pid_t) -> Option<ReturnState> {
         // children exited
 
         let signaled = WIFSIGNALED(status);
-        if signaled {
+        let termsig = if signaled {
             let termsig = WTERMSIG(status);
             log::info!(
                 "app {} terminated by signal {} ({})",
@@ -244,7 +324,10 @@ fn poll_pid(pid: pid_t) -> Option<ReturnState> {
                 signal_name(termsig as usize).unwrap_or("UNKNOWN"),
                 termsig
             );
-        }
+            termsig
+        } else {
+            0
+        };
 
         // parse status
         let normal = WIFEXITED(status);
@@ -252,7 +335,7 @@ fn poll_pid(pid: pid_t) -> Option<ReturnState> {
             true => ReturnState::Completed {
                 ret: WEXITSTATUS(status),
             },
-            false => ReturnState::Abnormal,
+            false => ReturnState::Abnormal { signal: termsig },
         };
         log::info!("app {} returned {:?}", pid, return_state);
         Some(return_state)
@@ -284,6 +367,7 @@ struct AppRuntime {
     stderr: PipeReader,
     pidfd: RawFd,
     tokens: AppRtTokens,
+    started_at: Instant,
 
     /// Indicates whether AppRuntime::stop was called before the runtime was dropped
     proper_cleanup: bool,
@@ -442,6 +526,7 @@ impl AppRuntime {
                     stdout: stdout_token,
                     stderr: stderr_token,
                 },
+                started_at: Instant::now(),
                 proper_cleanup: false,
             })
         } else {

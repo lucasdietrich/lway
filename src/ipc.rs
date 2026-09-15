@@ -33,6 +33,8 @@ pub enum IpcError {
     Json(#[from] serde_json::Error),
     #[error("daemon returned an error: {0}")]
     Daemon(String),
+    #[error("no such app '{name}' (available: {})", if apps.is_empty() { "none".to_string() } else { apps.join(", ") })]
+    AppNotFound { name: String, apps: Vec<String> },
     #[error("could not connect to daemon socket {0} (is lway running?)")]
     NotRunning(PathBuf),
 }
@@ -166,6 +168,16 @@ impl Server {
                 Ok(Request::List) => Response::AppList {
                     apps: apps.iter().map(app_info).collect(),
                 },
+                Ok(Request::Stats { name }) => match apps.iter().find(|app| app.name() == name) {
+                    Some(app) => Response::AppStats {
+                        name: app.name().to_string(),
+                        stats: app.stats(),
+                    },
+                    None => Response::AppNotFound {
+                        name,
+                        apps: apps.iter().map(|app| app.name().to_string()).collect(),
+                    },
+                },
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },
@@ -252,10 +264,20 @@ fn reject_over_capacity(stream: &mut UnixStream) {
 
 fn app_info(app: &App) -> AppInfo {
     let cgroup = app.cgroup_config();
+    let stats = app.stats();
     AppInfo {
         name: app.name().to_string(),
-        pid: app.pid(),
         state: app.status_string(),
+        pid: app.pid(),
+        command: app.command(),
+        cwd: app.cwd().map(str::to_string),
+        uid: app.uid(),
+        gid: app.gid(),
+        restart_count: stats.restart_count,
+        log_bytes: stats.stdout_bytes + stats.stderr_bytes,
+        memory_current: stats.memory_current,
+        io_read_bytes: stats.io_read_bytes,
+        io_write_bytes: stats.io_write_bytes,
         oneshot: app.is_oneshot(),
         cpu_weight: cgroup.cpu_weight,
         io_weight: cgroup.io_weight,
