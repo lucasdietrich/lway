@@ -505,8 +505,6 @@ fn poll_pid(pid: pid_t) -> Option<ReturnState> {
 pub enum AppRuntimeError {
     #[error("Fork failed {0}")]
     ForkFailed(i32),
-    #[error("Execv failed {0}")]
-    ExecvFailed(Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Token allocation failed")]
@@ -556,7 +554,7 @@ impl AppRuntime {
                 .iter()
                 .map(|cstring| cstring.as_ptr() as *const c_char)
                 .collect();
-            // execv expects a null-terminated array
+            // execve expects a null-terminated array
             argv.push(std::ptr::null());
 
             // let ret = unsafe {
@@ -612,8 +610,10 @@ impl AppRuntime {
                 libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())
             };
             let error = std::io::Error::last_os_error();
-            eprintln!("execv returned {} errno: {}", ret, error,);
-            Err(AppRuntimeError::ExecvFailed(error))
+            eprintln!("execve returned {} errno: {}", ret, error,);
+            
+            // Exit the child process with failure status
+            unsafe { libc::exit(libc::EXIT_FAILURE) }
         } else if ret > 0 {
             let pid = ret as libc::pid_t;
             let cgroup = init_app_cgroup(&params.name, pid, &params.cgroup);
