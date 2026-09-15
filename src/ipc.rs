@@ -17,10 +17,10 @@ use mio::net::{UnixListener, UnixStream};
 use mio::{Interest, Poll, Token};
 use thiserror::Error;
 
-use crate::UNIX_LISTENER_TOKEN;
 use crate::mio_token_slab::MioTokenSlab;
 use crate::protocol::{AppInfo, Request, Response};
 use crate::runtime::App;
+use crate::UNIX_LISTENER_TOKEN;
 
 /// Cap on concurrent control-socket connections; see `Server::bind`.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 32;
@@ -113,7 +113,7 @@ impl Server {
                         reject_over_capacity(&mut stream);
                         continue;
                     }
-                    if let Some(token) = token_slab.alloc() {
+                    if let Some(token) = token_slab.allocate() {
                         poll.registry()
                             .register(&mut stream, token, Interest::READABLE)?;
                         self.connections.insert(token, Connection::new(stream));

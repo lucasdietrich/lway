@@ -8,13 +8,30 @@ pub trait Logger {
     fn log(&self, name: &str, pid: libc::pid_t, bytes: &[u8]) -> Result<(), Box<dyn Error>>;
 }
 
-pub struct StdoutLogger;
+const DEFAULT_GUTTER_WIDTH: usize = 16;
+
+pub struct StdoutLogger {
+    gutter_width: usize,
+}
+
+impl StdoutLogger {
+    pub fn new(gutter_width: usize) -> Self {
+        Self { gutter_width }
+    }
+}
+
+impl Default for StdoutLogger {
+    fn default() -> Self {
+        Self { gutter_width: DEFAULT_GUTTER_WIDTH }
+    }
+}
 
 impl Logger for StdoutLogger {
     fn log(&self, name: &str, pid: libc::pid_t, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
         let string = String::from_utf8_lossy(bytes);
         for line in string.lines() {
-            println!("[{} {}] {}", pid, name, line);
+            let prefix = format!("[{} {}]", pid, name);
+            println!("{:width$} {}", prefix, line, width = self.gutter_width);
         }
         Ok(())
     }

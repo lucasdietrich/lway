@@ -3,18 +3,21 @@ use std::{io, path::PathBuf, time::Duration};
 use clap::{Parser, Subcommand};
 use mio::{unix::SourceFd, Events, Poll, Token};
 
-use crate::{cgroups::init_main_cgroup, config::GlobalConfig, mio_token_slab::MioTokenSlab, runtime::App, support::signal::handle_signal_fd};
+use crate::{
+    cgroups::init_main_cgroup, config::GlobalConfig, mio_token_slab::MioTokenSlab, runtime::App,
+    support::signal::handle_signal_fd,
+};
 
 pub mod cgroups;
 pub mod config;
 pub mod ipc;
 pub mod logger;
+pub mod mio_token_slab;
 pub mod parser;
 pub mod pipe;
 pub mod protocol;
 pub mod runtime;
 pub mod support;
-pub mod mio_token_slab;
 
 const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 // world-writable /tmp is fine for local experimentation; a real deployment
@@ -23,7 +26,6 @@ const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
 
 // Number of SIGINTs to tolerate before exiting
 const SIGINT_LIMIT: usize = 2;
-
 
 pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 pub const SIGNALFD_TOKEN: Token = Token(1);
@@ -126,9 +128,6 @@ fn main() {
     let apps = global_cfg.all_apps(&config_path);
     log::info!("{:#?}", apps);
 
-    // let siginfo = libc::sigset_t {}
-    // let ret = libc::signalfd(-1, mask, flags)
-
     let signalfd = match support::signal::setup_signal_fd() {
         Ok(fd) => fd,
         Err(e) => {
@@ -139,9 +138,11 @@ fn main() {
     let mut signal_sourcefd = SourceFd(&signalfd);
 
     let mut rt = Runtime::init();
-    let logger = logger::StdoutLogger;
+    let logger = logger::StdoutLogger::default();
 
     let main_cg = init_main_cgroup();
+
+    let mut poll = Poll::new().expect("create mio poll");
 
     for app_cfg in apps.into_iter() {
         let uid = app_cfg.resolved_uid();
@@ -173,11 +174,10 @@ fn main() {
             cgroup: app_cfg.cgroup,
         };
 
-        let app = App::start(params).expect("run_app");
+        let app = App::start(params, &mut poll, &mut rt.mio_token_slab).expect("run_app");
         rt.apps.push(app);
     }
 
-    let mut poll = Poll::new().expect("create mio poll");
     let mut ipc_server = ipc::Server::bind(&socket_path, &poll, ipc::DEFAULT_MAX_CONNECTIONS)
         .unwrap_or_else(|e| {
             log::error!(
@@ -187,7 +187,6 @@ fn main() {
             );
             std::process::exit(1);
         });
-    let mut events = Events::with_capacity(128);
 
     poll.registry()
         .register(
@@ -196,6 +195,8 @@ fn main() {
             mio::Interest::READABLE,
         )
         .expect("register signal fd");
+
+    let mut events = Events::with_capacity(128);
 
     loop {
         // Doubles as the supervisor's ~1s poll tick: app health/output is
@@ -208,6 +209,7 @@ fn main() {
 
         for event in events.iter() {
             let token = event.token();
+            log::debug!("poll ready for token: {:?} event: {:?}", token, event);
 
             if token == SIGNALFD_TOKEN {
                 match handle_signal_fd(&signalfd) {
@@ -227,30 +229,34 @@ fn main() {
                 }
                 continue;
             }
-            if !ipc_server.is_known(token) {
-                continue;
+
+            if ipc_server.is_known(token) {
+                if event.is_readable() {
+                    if let Err(e) = ipc_server.handle_readable(token, &rt.apps) {
+                        log::error!("control connection read error: {}", e);
+                        ipc_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                if event.is_writable() {
+                    if let Err(e) = ipc_server.handle_writable(token) {
+                        log::error!("control connection write error: {}", e);
+                        ipc_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                ipc_server.reconcile(token, &poll, &mut rt.mio_token_slab);
             }
 
-            if event.is_readable() {
-                if let Err(e) = ipc_server.handle_readable(token, &rt.apps) {
-                    log::error!("control connection read error: {}", e);
-                    ipc_server.close(token, &poll, &mut rt.mio_token_slab);
-                    continue;
-                }
+            // Create the equivalent is_known() for applications
+            for app in rt.apps.iter_mut() {
+                app.poll(&poll, &mut rt.mio_token_slab, token, event, &logger, !rt.stopping)
             }
-            if event.is_writable() {
-                if let Err(e) = ipc_server.handle_writable(token) {
-                    log::error!("control connection write error: {}", e);
-                    ipc_server.close(token, &poll, &mut rt.mio_token_slab);
-                    continue;
-                }
-            }
-            ipc_server.reconcile(token, &poll, &mut rt.mio_token_slab);
         }
 
         // If Ctrl+C (SIGINT) was received
         if rt.sigint_count > SIGINT_LIMIT {
-        log::info!("Sending SIGKILL to all child processes");
+            log::info!("Sending SIGKILL to all child processes");
             for app in rt.apps.iter() {
                 if let Err(e) = app.sigkill() {
                     log::error!("Failed to send SIGKILL to {}: {}", app, e);
@@ -263,10 +269,6 @@ fn main() {
                     log::error!("Failed to send SIGTERM to {}: {}", app, e);
                 }
             }
-        }
-
-        for app in rt.apps.iter_mut() {
-            app.poll(&logger, !rt.stopping);
         }
 
         if rt.apps.iter().filter(|app| app.is_running()).count() == 0 {

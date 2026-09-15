@@ -69,10 +69,15 @@ pub fn setup_signal_fd() -> io::Result<RawFd> {
     Ok(res)
 }
 
-
 pub fn handle_signal_fd(signal_fd: &RawFd) -> libc::c_int {
     let mut siginfo = MaybeUninit::<libc::signalfd_siginfo>::uninit();
-    let ret = unsafe { libc::read(*signal_fd, siginfo.as_mut_ptr() as *mut _, std::mem::size_of::<libc::signalfd_siginfo>()) };
+    let ret = unsafe {
+        libc::read(
+            *signal_fd,
+            siginfo.as_mut_ptr() as *mut _,
+            std::mem::size_of::<libc::signalfd_siginfo>(),
+        )
+    };
     if ret == std::mem::size_of::<libc::signalfd_siginfo>() as isize {
         let siginfo = unsafe { siginfo.assume_init() };
         let signo = siginfo.ssi_signo as usize;

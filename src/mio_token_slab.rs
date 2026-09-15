@@ -12,7 +12,7 @@ impl MioTokenSlab {
         }
     }
 
-    pub fn alloc(&mut self) -> Option<mio::Token> {
+    pub fn allocate(&mut self) -> Option<mio::Token> {
         if self.slab.len() >= self.slab.capacity() {
             log::warn!("MioTokenSlab capacity reached, cannot allocate new token");
             return None;
@@ -22,13 +22,13 @@ impl MioTokenSlab {
         let key = entry.key();
         let token = mio::Token(self.offset + key);
         entry.insert(token);
-        log::info!("Allocated new token: {:?}", token);
+        log::debug!("Allocated new token: {:?}", token);
         Some(token)
     }
 
     pub fn free(&mut self, token: mio::Token) {
         let key = token.0 - self.offset;
         self.slab.remove(key);
-        log::info!("Freed token: {:?}", token);
+        log::debug!("Freed token: {:?}", token);
     }
 }

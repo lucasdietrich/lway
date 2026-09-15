@@ -112,6 +112,9 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, sigint);
     signal(SIGTERM, sigterm);
 
+    // // Close stderr
+    // close(STDERR_FILENO);
+
     for (;;) {
         printf("Tick %u\n", i);
         sleep(1);
