@@ -19,6 +19,7 @@ use thiserror::Error;
 use crate::{
     cgroups::{init_app_cgroup, read_cgroup_usage, AppCgroupConfig, CgroupUsage},
     logger::Logger,
+    restart::RestartPolicy,
     stats::AppStats,
     support::{
         mio_token_slab::MioTokenSlab,
@@ -40,7 +41,7 @@ pub enum AppErr {
 }
 
 // remake <'a>
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppParams {
     pub cwd: PathBuf,
     pub name: String,
@@ -52,6 +53,7 @@ pub struct AppParams {
     pub oneshot: bool,
     pub cgroup: AppCgroupConfig,
     pub autostart: bool, // App automatically starts on creation
+    pub restart: RestartPolicy,
 }
 
 #[derive(Debug)]
@@ -64,6 +66,7 @@ struct AppRtTokens {
 #[derive(Debug, Default)]
 struct AppRuntimeStats {
     restart_count: u32,
+    consecutive_failures: u32,
     last_exit_code: Option<i32>,
     last_exit_reason: Option<String>,
     stdout_bytes: u64,
@@ -105,10 +108,100 @@ impl App {
         if let State::Stopped = self.state {
             let runtime = AppRuntime::start(&self.params, &poll, token_slab)?;
             self.state = State::Running(runtime);
+            self.runtime_stats.consecutive_failures = 0;
             Ok(())
         } else {
             Err(AppErr::AlreadyRunning)
         }
+    }
+
+    /// Deadline at which a scheduled restart should be attempted, if one is pending.
+    pub fn pending_restart_deadline(&self) -> Option<Instant> {
+        match &self.state {
+            State::PendingRestart { deadline, .. } => Some(*deadline),
+            _ => None,
+        }
+    }
+
+    /// Attempts a restart scheduled by `schedule_restart` once its delay has elapsed.
+    /// If `allow_restart` is false (e.g. the runtime is shutting down), the pending restart is
+    /// cancelled and the app settles into `Terminated` instead.
+    pub fn maybe_restart(
+        &mut self,
+        now: Instant,
+        poll: &mio::Poll,
+        token_slab: &mut MioTokenSlab,
+        allow_restart: bool,
+    ) {
+        let (deadline, cause) = match &self.state {
+            State::PendingRestart { deadline, cause } => (*deadline, *cause),
+            _ => return,
+        };
+
+        if !allow_restart {
+            self.state = State::Terminated(cause);
+            return;
+        }
+
+        if now < deadline {
+            return;
+        }
+
+        match AppRuntime::start(&self.params, poll, token_slab) {
+            Ok(runtime) => {
+                self.runtime_stats.restart_count += 1;
+                self.state = State::Running(runtime);
+            }
+            Err(err) => {
+                log::error!("Failed to restart app {}: {}", self.name, err);
+                self.state = State::Terminated(cause);
+            }
+        }
+    }
+
+    /// Applies the app's restart policy to decide the delay (or give-up) after `return_state`,
+    /// given how long the app ran (`uptime`) before exiting.
+    fn schedule_restart(&mut self, return_state: ReturnState, uptime: Duration) {
+        let policy = &self.params.restart;
+        let success = matches!(return_state, ReturnState::Completed { ret: 0 });
+
+        if success || uptime >= Duration::from_millis(policy.reset_after_ms) {
+            self.runtime_stats.consecutive_failures = 0;
+        }
+        if !success {
+            self.runtime_stats.consecutive_failures += 1;
+        }
+
+        if let Some(max) = policy.max_restart_attempts {
+            if self.runtime_stats.consecutive_failures > max {
+                log::error!(
+                    "app {} reached max restart attempts ({}), giving up",
+                    self.name,
+                    max
+                );
+                return;
+            }
+        }
+
+        let strategy = if success {
+            &policy.on_success
+        } else {
+            &policy.on_error
+        };
+        if strategy.is_never() {
+            log::info!(
+                "app {} restart policy is 'never' for this outcome, staying stopped",
+                self.name
+            );
+            return;
+        }
+
+        let delay = strategy.delay_for(self.runtime_stats.consecutive_failures.max(1));
+        log::info!("app {} will restart in {:?}", self.name, delay);
+        self.state = State::PendingRestart {
+            deadline: Instant::now() + delay,
+            cause: return_state,
+        };
     }
 
     pub fn name(&self) -> &str {
@@ -123,6 +216,7 @@ impl App {
         match &self.state {
             State::Stopped => "stopped".to_string(),
             State::Running(..) => "running".to_string(),
+            State::PendingRestart { .. } => "restarting".to_string(),
             State::Terminated(ReturnState::Completed { ret }) => format!("exited({})", ret),
             State::Terminated(ReturnState::Abnormal { signal }) => format!(
                 "abnormal(signal {})",
@@ -159,7 +253,7 @@ impl App {
     pub fn stats(&self) -> AppStats {
         let (uptime, cgroup_usage) = match &self.state {
             State::Running(rt) => (Some(rt.started_at.elapsed()), read_cgroup_usage(&rt.cgroup)),
-            State::Stopped | State::Terminated(..) => (None, CgroupUsage::default()),
+            _ => (None, CgroupUsage::default()),
         };
 
         AppStats {
@@ -255,32 +349,70 @@ impl App {
                     ),
                 });
 
-                {
-                    let terminated = State::Terminated(return_state);
-                    let State::Running(rt) = std::mem::replace(&mut self.state, terminated) else {
-                        unreachable!();
-                    };
+                let terminated = State::Terminated(return_state);
+                let State::Running(mut rt) = std::mem::replace(&mut self.state, terminated)
+                else {
+                    unreachable!();
+                };
 
-                    self.runtime_stats.total_uptime += rt.started_at.elapsed();
+                // The process may have written its last output and closed its
+                // pipes right before exiting, so their readable events can land
+                // in the same poll batch as this pidfd event. Drain whatever is
+                // still buffered now, since rt.stop() below deregisters and
+                // closes the pipes, after which those pending events become
+                // no-ops (state is no longer Running).
+                Self::drain_pipe(
+                    &mut rt.stdout,
+                    rt.pid,
+                    "stdout",
+                    &self.name,
+                    logger,
+                    &mut self.runtime_stats.stdout_bytes,
+                );
+                Self::drain_pipe(
+                    &mut rt.stderr,
+                    rt.pid,
+                    "stderr",
+                    &self.name,
+                    logger,
+                    &mut self.runtime_stats.stderr_bytes,
+                );
 
-                    rt.stop(poll, token_slab)
-                        .expect("Failed to stop app runtime");
+                let uptime = rt.started_at.elapsed();
+                self.runtime_stats.total_uptime += uptime;
 
-                    self.state = State::Terminated(return_state);
+                rt.stop(poll, token_slab)
+                    .expect("Failed to stop app runtime");
 
-                    // AppRuntime is getting dropped in the background (clearing cgroups, etc ...)
-                }
+                self.state = State::Terminated(return_state);
 
                 // evaluate the restart of the application
                 if try_restart && !self.params.oneshot {
-                    match AppRuntime::start(&self.params, &poll, token_slab) {
-                        Ok(runtime) => {
-                            self.runtime_stats.restart_count += 1;
-                            self.state = State::Running(runtime);
-                        }
-                        Err(err) => log::error!("Failed to restart app {}: {}", self.name, err),
-                    }
+                    self.schedule_restart(return_state, uptime);
                 }
+            }
+        }
+    }
+
+    /// Read a non-blocking pipe until it's empty (EAGAIN) or closed (EOF).
+    fn drain_pipe(
+        pipe: &mut PipeReader,
+        pid: pid_t,
+        stream: &str,
+        name: &str,
+        logger: &dyn Logger,
+        byte_count: &mut u64,
+    ) {
+        let mut buf = [0u8; STDIO_BUFFER_SIZE];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(rcvd) => {
+                    log::debug!("app {} drained {} bytes from {}", pid, rcvd, stream);
+                    *byte_count += rcvd as u64;
+                    logger.log(name, pid, &buf[..rcvd]).expect("log drain");
+                }
+                Err(_) => break,
             }
         }
     }
@@ -445,17 +577,16 @@ impl AppRuntime {
 
             // setgid must happen before setuid: once uid is dropped, permission to
             // change gid is lost.
-            log::info!("Setting gid: {} uid: {}", params.gid, params.uid);
 
             let ret = unsafe { libc::setgid(params.gid) };
             to_ioresult(ret).map_err(|e| {
-                log::error!("setgid failed: {}", e);
+                eprintln!("setgid failed: {}", e);
                 AppRuntimeError::Io(e)
             })?;
 
             let ret = unsafe { libc::setuid(params.uid) };
             to_ioresult(ret).map_err(|e| {
-                log::error!("setuid failed: {}", e);
+                eprintln!("setuid failed: {}", e);
                 AppRuntimeError::Io(e)
             })?;
 
@@ -472,9 +603,8 @@ impl AppRuntime {
             envp.push(std::ptr::null());
 
             // Set working directory if specified
-            log::info!("Changing working directory to {}", params.cwd.display());
             set_current_cwd(&params.cwd).map_err(|e| {
-                log::error!("chdir failed: {}", e);
+                eprintln!("chdir failed: {}", e);
                 AppRuntimeError::Io(e)
             })?;
 
@@ -482,7 +612,7 @@ impl AppRuntime {
                 libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())
             };
             let error = std::io::Error::last_os_error();
-            log::error!("execv returned {} errno: {}", ret, error,);
+            eprintln!("execv returned {} errno: {}", ret, error,);
             Err(AppRuntimeError::ExecvFailed(error))
         } else if ret > 0 {
             let pid = ret as libc::pid_t;
@@ -606,6 +736,10 @@ impl Drop for AppRuntime {
 enum State {
     Stopped,
     Running(AppRuntime),
+    PendingRestart {
+        deadline: Instant,
+        cause: ReturnState,
+    },
     Terminated(ReturnState),
 }
 
@@ -627,4 +761,223 @@ fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
     let ret = unsafe { dup2(src.as_raw_fd(), dst.as_raw_fd()) };
     to_ioresult(ret)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use crate::restart::RestartDelay;
+
+    use super::*;
+
+    fn make_params(restart: RestartPolicy) -> AppParams {
+        AppParams {
+            cwd: PathBuf::from("."),
+            name: "test-app".to_string(),
+            prog: "true".to_string(),
+            args: vec!["true".to_string()],
+            uid: 0,
+            gid: 0,
+            env: Vec::new(),
+            oneshot: false,
+            cgroup: AppCgroupConfig {
+                cpu_weight: None,
+                io_weight: None,
+                memory_hard_limit: None,
+                memory_soft_limit: None,
+                memory_swap_limit: None,
+            },
+            autostart: false,
+            restart,
+        }
+    }
+
+    fn make_app(restart: RestartPolicy) -> App {
+        App {
+            name: "test-app".to_string(),
+            params: make_params(restart),
+            state: State::Stopped,
+            runtime_stats: AppRuntimeStats::default(),
+        }
+    }
+
+    fn pending_deadline(app: &App) -> Instant {
+        match &app.state {
+            State::PendingRestart { deadline, .. } => *deadline,
+            other => panic!("expected PendingRestart, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn schedule_restart_uses_success_or_error_strategy() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::Constant { delay_ms: 100 },
+            on_error: RestartDelay::Constant { delay_ms: 500 },
+            reset_after_ms: 60_000,
+            max_restart_attempts: None,
+        };
+        let mut app = make_app(policy);
+
+        let before = Instant::now();
+        app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(5));
+        let deadline = pending_deadline(&app);
+        assert!(deadline >= before + Duration::from_millis(100));
+        assert!(deadline < before + Duration::from_millis(500));
+        assert_eq!(app.runtime_stats.consecutive_failures, 0);
+
+        app.state = State::Stopped;
+        let before = Instant::now();
+        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::from_secs(5));
+        let deadline = pending_deadline(&app);
+        assert!(deadline >= before + Duration::from_millis(500));
+        assert_eq!(app.runtime_stats.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn restart_on_failure_only_stops_after_success() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::Never,
+            on_error: RestartDelay::Constant { delay_ms: 100 },
+            reset_after_ms: 60_000,
+            max_restart_attempts: None,
+        };
+        let mut app = make_app(policy);
+
+        // Fails: gets scheduled for restart.
+        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::from_secs(1));
+        assert!(matches!(app.state, State::PendingRestart { .. }));
+
+        // Succeeds: stays put, no restart is scheduled.
+        app.state = State::Terminated(ReturnState::Completed { ret: 0 });
+        app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(1));
+        assert!(matches!(
+            app.state,
+            State::Terminated(ReturnState::Completed { ret: 0 })
+        ));
+    }
+
+    #[test]
+    fn consecutive_failures_reset_on_success() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::default(),
+            on_error: RestartDelay::ExponentialBackoff {
+                initial_delay_ms: 10,
+                max_delay_ms: 1000,
+                multiplier: 2.0,
+            },
+            reset_after_ms: 60_000,
+            max_restart_attempts: None,
+        };
+        let mut app = make_app(policy);
+
+        app.schedule_restart(
+            ReturnState::Abnormal { signal: 6 },
+            Duration::from_millis(10),
+        );
+        assert_eq!(app.runtime_stats.consecutive_failures, 1);
+        app.state = State::Stopped;
+
+        app.schedule_restart(
+            ReturnState::Abnormal { signal: 6 },
+            Duration::from_millis(10),
+        );
+        assert_eq!(app.runtime_stats.consecutive_failures, 2);
+        app.state = State::Stopped;
+
+        // A clean exit resets the failure streak.
+        app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(1));
+        assert_eq!(app.runtime_stats.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn consecutive_failures_reset_after_long_enough_uptime() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::default(),
+            on_error: RestartDelay::default(),
+            reset_after_ms: 1_000,
+            max_restart_attempts: None,
+        };
+        let mut app = make_app(policy);
+
+        app.schedule_restart(
+            ReturnState::Completed { ret: 1 },
+            Duration::from_millis(500),
+        );
+        assert_eq!(app.runtime_stats.consecutive_failures, 1);
+        app.state = State::Stopped;
+
+        // Ran longer than reset_after_ms before crashing again: streak resets, then this
+        // failure brings it back to 1 rather than 2.
+        app.schedule_restart(
+            ReturnState::Completed { ret: 1 },
+            Duration::from_millis(2_000),
+        );
+        assert_eq!(app.runtime_stats.consecutive_failures, 1);
+    }
+
+    #[test]
+    fn max_restart_attempts_stops_scheduling_further_restarts() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::default(),
+            on_error: RestartDelay::Constant { delay_ms: 0 },
+            reset_after_ms: 60_000,
+            max_restart_attempts: Some(2),
+        };
+        let mut app = make_app(policy);
+
+        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
+        assert!(matches!(app.state, State::PendingRestart { .. }));
+        app.state = State::Stopped;
+
+        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
+        assert!(matches!(app.state, State::PendingRestart { .. }));
+        app.state = State::Stopped;
+
+        // Third consecutive failure exceeds max_restart_attempts: give up, no more restarts.
+        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
+        assert_eq!(app.runtime_stats.consecutive_failures, 3);
+        assert!(matches!(app.state, State::Stopped));
+    }
+
+    #[test]
+    fn maybe_restart_waits_for_its_deadline() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::default(),
+            on_error: RestartDelay::Constant { delay_ms: 60_000 },
+            reset_after_ms: 60_000,
+            max_restart_attempts: None,
+        };
+        let mut app = make_app(policy);
+        app.schedule_restart(ReturnState::Abnormal { signal: 9 }, Duration::ZERO);
+        let deadline = app.pending_restart_deadline().expect("pending restart");
+
+        let poll = mio::Poll::new().expect("create poll");
+        let mut token_slab = MioTokenSlab::new(8, 0);
+
+        // Deadline is 60s out: nothing should happen yet.
+        app.maybe_restart(Instant::now(), &poll, &mut token_slab, true);
+        assert_eq!(app.pending_restart_deadline(), Some(deadline));
+    }
+
+    #[test]
+    fn maybe_restart_cancelled_on_shutdown() {
+        let policy = RestartPolicy {
+            on_success: RestartDelay::default(),
+            on_error: RestartDelay::Constant { delay_ms: 60_000 },
+            reset_after_ms: 60_000,
+            max_restart_attempts: None,
+        };
+        let mut app = make_app(policy);
+        app.schedule_restart(ReturnState::Abnormal { signal: 9 }, Duration::ZERO);
+        assert!(app.pending_restart_deadline().is_some());
+
+        let poll = mio::Poll::new().expect("create poll");
+        let mut token_slab = MioTokenSlab::new(8, 0);
+
+        app.maybe_restart(Instant::now(), &poll, &mut token_slab, false);
+        assert!(app.pending_restart_deadline().is_none());
+        assert!(matches!(
+            app.state,
+            State::Terminated(ReturnState::Abnormal { signal: 9 })
+        ));
+    }
 }

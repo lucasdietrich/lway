@@ -4,6 +4,7 @@ use serde::Deserialize;
 
 use crate::{
     cgroups::AppCgroupConfig,
+    restart::RestartPolicy,
     support::uidgid::{get_gid, get_uid},
 };
 
@@ -27,6 +28,8 @@ pub struct AppConfig {
     pub oneshot: bool,
     #[serde(default = "default_autostart")]
     pub autostart: bool,
+    #[serde(default)]
+    pub restart: RestartPolicy,
     #[serde(flatten)]
     pub cgroup: AppCgroupConfig,
 }
@@ -67,6 +70,7 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use crate::parser::Config;
+    use crate::restart::{RestartDelay, RestartPolicy};
 
     use super::AppConfig;
 
@@ -80,6 +84,75 @@ workdir: workdir
         let cfg: AppConfig = serde_yaml::from_str(yaml)?;
         assert_eq!(cfg.command, "hello -v");
         assert_eq!(cfg.workdir.as_deref(), Some("workdir"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_app_config_default_restart_policy() -> Result<(), Box<dyn std::error::Error>> {
+        // No `restart:` key: falls back to immediate, unlimited restarts.
+        let yaml = r#"
+command: "hello"
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(cfg.restart, RestartPolicy::default());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_app_config_constant_restart_policy() -> Result<(), Box<dyn std::error::Error>> {
+        let yaml = r#"
+command: "hello"
+restart:
+  on_success:
+    strategy: constant
+    delay_ms: 1000
+  on_error:
+    strategy: constant
+    delay_ms: 500
+  max_restart_attempts: 3
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(
+            cfg.restart.on_success,
+            RestartDelay::Constant { delay_ms: 1000 }
+        );
+        assert_eq!(
+            cfg.restart.on_error,
+            RestartDelay::Constant { delay_ms: 500 }
+        );
+        assert_eq!(cfg.restart.max_restart_attempts, Some(3));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_app_config_exponential_backoff_restart_policy() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let yaml = r#"
+command: "hello"
+restart:
+  on_error:
+    strategy: exponential_backoff
+    initial_delay_ms: 200
+    max_delay_ms: 10000
+    multiplier: 3.0
+  reset_after_ms: 30000
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml)?;
+        assert_eq!(
+            cfg.restart.on_error,
+            RestartDelay::ExponentialBackoff {
+                initial_delay_ms: 200,
+                max_delay_ms: 10_000,
+                multiplier: 3.0,
+            }
+        );
+        // on_success wasn't specified: keeps the default (immediate restart).
+        assert_eq!(cfg.restart.on_success, RestartDelay::default());
+        assert_eq!(cfg.restart.reset_after_ms, 30_000);
+        assert_eq!(cfg.restart.max_restart_attempts, None);
 
         Ok(())
     }

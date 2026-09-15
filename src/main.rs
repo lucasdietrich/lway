@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, time::Instant};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use mio::{unix::SourceFd, Events, Poll, Token};
@@ -21,6 +21,7 @@ pub mod ipc;
 pub mod logger;
 pub mod parser;
 pub mod protocol;
+pub mod restart;
 pub mod runtime;
 pub mod stats;
 pub mod support;
@@ -198,7 +199,17 @@ fn main() {
             oneshot: app_cfg.oneshot,
             cgroup: app_cfg.cgroup,
             autostart: app_cfg.autostart,
+            restart: app_cfg.restart,
         };
+
+        if params.oneshot
+            && (!params.restart.on_success.is_never() || !params.restart.on_error.is_never())
+        {
+            log::warn!(
+                "app {} is oneshot, its restart policy is ignored",
+                params.name
+            );
+        }
 
         let app = App::create(params, &poll, &mut rt.mio_token_slab).expect("run_app");
         rt.apps.push(app);
@@ -225,7 +236,15 @@ fn main() {
     let mut events = Events::with_capacity(MAX_MIO_TOKENS);
 
     loop {
-        if let Err(e) = poll.poll(&mut events, None) {
+        let now = Instant::now();
+        let timeout = rt
+            .apps
+            .iter()
+            .filter_map(|app| app.pending_restart_deadline())
+            .min()
+            .map(|deadline| deadline.saturating_duration_since(now));
+
+        if let Err(e) = poll.poll(&mut events, timeout) {
             if e.kind() != io::ErrorKind::Interrupted {
                 log::error!("control socket poll error: {}", e);
             }
@@ -275,10 +294,13 @@ fn main() {
                     }
                 }
                 ipc_server.reconcile(token, &poll, &mut rt.mio_token_slab);
+                continue;
             }
 
             // Create the equivalent is_known() for applications
             for app in rt.apps.iter_mut() {
+                // TODO optimize this, as finding the app matching the token could be long if there is a lot of apps
+                // also immediately exit the loop if the matching app is found
                 app.poll(
                     &poll,
                     &mut rt.mio_token_slab,
@@ -288,6 +310,12 @@ fn main() {
                     !rt.stopping,
                 )
             }
+        }
+
+        // fire any scheduled restarts whose delay has elapsed
+        let now = Instant::now();
+        for app in rt.apps.iter_mut() {
+            app.maybe_restart(now, &poll, &mut rt.mio_token_slab, !rt.stopping);
         }
 
         // If Ctrl+C (SIGINT) was received
@@ -307,7 +335,11 @@ fn main() {
             }
         }
 
-        if rt.apps.iter().filter(|app| app.is_running()).count() == 0 {
+        if rt
+            .apps
+            .iter()
+            .all(|app| !app.is_running() && app.pending_restart_deadline().is_none())
+        {
             log::info!("all apps returned, exiting ...");
             break;
         }

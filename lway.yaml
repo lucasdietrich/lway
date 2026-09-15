@@ -1,30 +1,38 @@
 apps_dir: .
 apps:
-  - name: app
-    command: /var/amy/app 10
   - name: id-root
     command: /usr/bin/id
     oneshot: true
-  - name: test1
-    command: /var/amy/test -M 100
-    cpu_weight: 100
-  - name: test2
-    command: /var/amy/test -M 100
-    cpu_weight: 10
-  - name: test3
-    command: /var/amy/test -M 100
-    cpu_weight: 5
-    io_weight: 100
-    user: www
-    group: www
-    workdir: /tmp
-    env:
-      MYVAR1: value1
-    autostart: false
-  - name: write1
-    command: /var/amy/writer /var/amy/f1.txt -s 64
-  - name: write2
-    command: /var/amy/writer /var/amy/f2.txt -s 128
+    restart:
+      on_success:
+        strategy: constant
+        delay_ms: 1000
+      on_error:
+        strategy: constant
+        delay_ms: 1000
+      max_restart_attempts: 3
+  # - name: app
+  #   command: /var/amy/app 10
+  # - name: test1
+  #   command: /var/amy/test -M 100
+  #   cpu_weight: 100
+  # - name: test2
+  #   command: /var/amy/test -M 100
+  #   cpu_weight: 10
+  # - name: test3
+  #   command: /var/amy/test -M 100
+  #   cpu_weight: 5
+  #   io_weight: 100
+  #   user: www
+  #   group: www
+  #   workdir: /tmp
+  #   env:
+  #     MYVAR1: value1
+  #   autostart: false
+  # - name: write1
+  #   command: /var/amy/writer /var/amy/f1.txt -s 64
+  # - name: write2
+  #   command: /var/amy/writer /var/amy/f2.txt -s 128
 
 
 
