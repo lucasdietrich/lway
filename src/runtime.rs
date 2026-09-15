@@ -1,5 +1,11 @@
 use std::{
-    ffi::{CString, c_int}, fmt::Display, io::{self, Error, Read}, os::fd::{AsRawFd, RawFd}, path::{Path, PathBuf}, str::FromStr, time::{Duration, Instant},
+    ffi::{c_int, CString},
+    fmt::Display,
+    io::{self, Error, Read},
+    os::fd::{AsRawFd, RawFd},
+    path::{Path, PathBuf},
+    str::FromStr,
+    time::{Duration, Instant},
 };
 
 use cgroups_rs::fs::Cgroup;
@@ -11,8 +17,15 @@ use mio::unix::SourceFd;
 use thiserror::Error;
 
 use crate::{
-    cgroups::{AppCgroupConfig, CgroupUsage, init_app_cgroup, read_cgroup_usage}, logger::Logger, stats::AppStats, support::{
-        mio_token_slab::MioTokenSlab, pipe::{Pipe, PipeReader}, signal::signal_name, to_ioresult, uidgid::set_current_cwd,
+    cgroups::{init_app_cgroup, read_cgroup_usage, AppCgroupConfig, CgroupUsage},
+    logger::Logger,
+    stats::AppStats,
+    support::{
+        mio_token_slab::MioTokenSlab,
+        pipe::{Pipe, PipeReader},
+        signal::signal_name,
+        to_ioresult,
+        uidgid::set_current_cwd,
     },
 };
 
