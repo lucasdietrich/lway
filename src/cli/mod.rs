@@ -9,6 +9,7 @@ use crate::ipc::{IpcError, Result};
 use crate::protocol::{Request, Response};
 
 pub mod config;
+pub mod dispatch;
 pub mod info;
 pub mod list;
 pub mod start;

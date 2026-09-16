@@ -41,3 +41,7 @@
 - [ ] add daemon cli option to choose logger
 - [x] add daemon cli option to tell to not exit when all is off
 - [ ] websocket for logging through web
+- [ ] improve ./lway list MEM column representation as it shows RAM cached pages (unused), might be improved as current metric is meaningless
+    cat /sys/fs/cgroup/lway/write1/memory.stat
+    like 'inactive_file 14041088'
+- [ ] do not block waiting for cgroups process kill, use epoll
