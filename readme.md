@@ -45,3 +45,4 @@
     cat /sys/fs/cgroup/lway/write1/memory.stat
     like 'inactive_file 14041088'
 - [ ] do not block waiting for cgroups process kill, use epoll
+- [ ] runtime cgroups creation optimization: Profiling lway on mpx.usb showed that >95% of its CPU time is kernel-side cgroup churn, not its own logic: runtime.rs creates a fresh 3-controller cgroup on every app spawn and tears it down on every exit, which dominates when apps restart every second. The fix would be to reuse each app's cgroup across restarts instead of recreating it each cycle, not yet implemented, per your call to stop at reporting.
