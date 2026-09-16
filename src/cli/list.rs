@@ -22,20 +22,8 @@ pub fn list_apps(socket_path: &Path) -> Result<Vec<AppInfo>> {
 /// Prints `apps` as a simple column-aligned table.
 pub fn print_apps_table(apps: &[AppInfo]) {
     const HEADERS: [&str; 14] = [
-        "NAME",
-        "STATE",
-        "PID",
-        "COMMAND",
-        "CWD",
-        "UID",
-        "GID",
-        "RESTARTS",
-        "LOG_BYTES",
-        "MEM",
-        "IO (R/W)",
-        "ONESHOT",
-        "CPU_WEIGHT",
-        "IO_WEIGHT",
+        "NAME", "STATE", "PID", "COMMAND", "CWD", "UID", "GID", "REST", "LOG", "MEM", "IO (R/W)",
+        "ONESHOT", "CPU_W", "IO_W",
     ];
 
     let dash = || "-".to_string();

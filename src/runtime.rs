@@ -100,7 +100,7 @@ impl App {
                 let runtime = AppRuntime::start(&params, &poll, token_slab)?;
                 State::Running(runtime)
             }
-            false => State::Stopped,
+            false => State::default(),
         };
 
         Ok(App {
@@ -114,14 +114,14 @@ impl App {
 
     pub fn start(&mut self, poll: &mio::Poll, token_slab: &mut MioTokenSlab) -> Result<(), AppErr> {
         match self.state {
-            State::Stopped | State::Terminated(..) => {
+            State::Stopped { .. } => {
                 let runtime = AppRuntime::start(&self.params, &poll, token_slab)?;
                 self.state = State::Running(runtime);
                 self.runtime_stats.consecutive_failures = 0;
                 self.stop_requested = false;
                 Ok(())
             }
-            State::Running(..) | State::PendingRestart { .. } => Err(AppErr::AlreadyRunning),
+            State::Running(..) => Err(AppErr::AlreadyRunning),
         }
     }
 
@@ -143,12 +143,18 @@ impl App {
                 result.map_err(AppRuntimeError::from)?;
                 Ok(true)
             }
-            State::PendingRestart { cause, .. } => {
+            State::Stopped(Some(LastExecutionInfo {
+                cause,
+                restart_deadline: Some(_),
+            })) => {
+                self.state = State::Stopped(Some(LastExecutionInfo {
+                    cause: *cause,
+                    restart_deadline: None,
+                }));
                 self.stop_requested = true;
-                self.state = State::Terminated(*cause);
-                Ok(false)
+                Ok(true)
             }
-            State::Stopped | State::Terminated(..) => Ok(false),
+            _ => Ok(false),
         }
     }
 
@@ -159,7 +165,9 @@ impl App {
     /// Deadline at which a scheduled restart should be attempted, if one is pending.
     pub fn pending_restart_deadline(&self) -> Option<Instant> {
         match &self.state {
-            State::PendingRestart { deadline, .. } => Some(*deadline),
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline, ..
+            })) => *restart_deadline,
             _ => None,
         }
     }
@@ -175,12 +183,15 @@ impl App {
         allow_restart: bool,
     ) {
         let (deadline, cause) = match &self.state {
-            State::PendingRestart { deadline, cause } => (*deadline, *cause),
+            State::Stopped(Some(LastExecutionInfo {
+                cause,
+                restart_deadline: Some(deadline),
+            })) => (*deadline, *cause),
             _ => return,
         };
 
         if !allow_restart {
-            self.state = State::Terminated(cause);
+            self.state = State::stopped_with_cause(cause);
             return;
         }
 
@@ -195,16 +206,16 @@ impl App {
             }
             Err(err) => {
                 log::error!("Failed to restart app {}: {}", self.name, err);
-                self.state = State::Terminated(cause);
+                self.state = State::stopped_with_cause(cause);
             }
         }
     }
 
     /// Applies the app's restart policy to decide the delay (or give-up) after `return_state`,
     /// given how long the app ran (`uptime`) before exiting.
-    fn schedule_restart(&mut self, return_state: ReturnState, uptime: Duration) {
+    fn schedule_restart(&mut self, restart_state: ReturnState, uptime: Duration) {
         let policy = &self.params.restart;
-        let success = matches!(return_state, ReturnState::Completed { ret: 0 });
+        let success = matches!(restart_state, ReturnState::Completed { ret: 0 });
 
         if success || uptime >= Duration::from_millis(policy.reset_after_ms) {
             self.runtime_stats.consecutive_failures = 0;
@@ -239,10 +250,10 @@ impl App {
 
         let delay = strategy.delay_for(self.runtime_stats.consecutive_failures.max(1));
         log::info!("app {} will restart in {:?}", self.name, delay);
-        self.state = State::PendingRestart {
-            deadline: Instant::now() + delay,
-            cause: return_state,
-        };
+        self.state = State::Stopped(Some(LastExecutionInfo {
+            cause: restart_state,
+            restart_deadline: Some(Instant::now() + delay),
+        }));
     }
 
     pub fn name(&self) -> &str {
@@ -255,14 +266,18 @@ impl App {
 
     pub fn status_string(&self) -> String {
         match &self.state {
-            State::Stopped => "stopped".to_string(),
             State::Running(..) => "running".to_string(),
-            State::PendingRestart { .. } => "restarting".to_string(),
-            State::Terminated(ReturnState::Completed { ret }) => format!("exited({})", ret),
-            State::Terminated(ReturnState::Abnormal { signal }) => format!(
-                "abnormal(signal {})",
-                signal_name(*signal as usize).unwrap_or("UNKNOWN")
-            ),
+            State::Stopped(None) => "stopped".to_string(),
+            State::Stopped(Some(LastExecutionInfo {
+                cause,
+                restart_deadline,
+            })) => match cause {
+                ReturnState::Abnormal { signal } => format!(
+                    "abnormal(signal {})",
+                    signal_name(*signal as usize).unwrap_or("UNKNOWN")
+                ),
+                ReturnState::Completed { ret } => format!("exited({})", ret),
+            },
         }
     }
 
@@ -390,7 +405,7 @@ impl App {
                     ),
                 });
 
-                let terminated = State::Terminated(return_state);
+                let terminated = State::stopped_with_cause(return_state);
                 let State::Running(mut rt) = std::mem::replace(&mut self.state, terminated) else {
                     unreachable!();
                 };
@@ -423,8 +438,6 @@ impl App {
 
                 rt.stop(poll, token_slab)
                     .expect("Failed to stop app runtime");
-
-                self.state = State::Terminated(return_state);
 
                 // evaluate the restart of the application
                 if try_restart && !self.params.oneshot && !self.stop_requested {
@@ -782,17 +795,31 @@ impl Drop for AppRuntime {
 }
 
 #[derive(Debug)]
+struct LastExecutionInfo {
+    cause: ReturnState,
+    restart_deadline: Option<Instant>,
+}
+
+#[derive(Debug)]
 enum State {
-    Stopped,
+    Stopped(Option<LastExecutionInfo>),
     Running(AppRuntime),
-    PendingRestart {
-        deadline: Instant,
-        cause: ReturnState,
-    },
-    Terminated(ReturnState),
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State::Stopped(None)
+    }
 }
 
 impl State {
+    fn stopped_with_cause(cause: ReturnState) -> Self {
+        State::Stopped(Some(LastExecutionInfo {
+            cause,
+            restart_deadline: None,
+        }))
+    }
+
     fn as_runtime(&self) -> Option<&AppRuntime> {
         if let State::Running(rt) = self {
             Some(rt)
@@ -844,7 +871,7 @@ mod restart_tests {
         App {
             name: "test-app".to_string(),
             params: make_params(restart),
-            state: State::Stopped,
+            state: State::default(),
             runtime_stats: AppRuntimeStats::default(),
             stop_requested: false,
         }
@@ -852,8 +879,11 @@ mod restart_tests {
 
     fn pending_deadline(app: &App) -> Instant {
         match &app.state {
-            State::PendingRestart { deadline, .. } => *deadline,
-            other => panic!("expected PendingRestart, got {:?}", other),
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline: Some(deadline),
+                ..
+            })) => *deadline,
+            other => panic!("expected Stopped with restart_deadline, got {:?}", other),
         }
     }
 
@@ -874,7 +904,7 @@ mod restart_tests {
         assert!(deadline < before + Duration::from_millis(500));
         assert_eq!(app.runtime_stats.consecutive_failures, 0);
 
-        app.state = State::Stopped;
+        app.state = State::default();
         let before = Instant::now();
         app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::from_secs(5));
         let deadline = pending_deadline(&app);
@@ -894,14 +924,26 @@ mod restart_tests {
 
         // Fails: gets scheduled for restart.
         app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::from_secs(1));
-        assert!(matches!(app.state, State::PendingRestart { .. }));
+        assert!(matches!(
+            app.state,
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline: Some(..),
+                ..
+            }))
+        ));
 
         // Succeeds: stays put, no restart is scheduled.
-        app.state = State::Terminated(ReturnState::Completed { ret: 0 });
+        app.state = State::Stopped(Some(LastExecutionInfo {
+            restart_deadline: None,
+            cause: ReturnState::Completed { ret: 0 },
+        }));
         app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(1));
         assert!(matches!(
             app.state,
-            State::Terminated(ReturnState::Completed { ret: 0 })
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline: None,
+                cause: ReturnState::Completed { ret: 0 }
+            }))
         ));
     }
 
@@ -924,14 +966,14 @@ mod restart_tests {
             Duration::from_millis(10),
         );
         assert_eq!(app.runtime_stats.consecutive_failures, 1);
-        app.state = State::Stopped;
+        app.state = State::default();
 
         app.schedule_restart(
             ReturnState::Abnormal { signal: 6 },
             Duration::from_millis(10),
         );
         assert_eq!(app.runtime_stats.consecutive_failures, 2);
-        app.state = State::Stopped;
+        app.state = State::default();
 
         // A clean exit resets the failure streak.
         app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(1));
@@ -953,7 +995,7 @@ mod restart_tests {
             Duration::from_millis(500),
         );
         assert_eq!(app.runtime_stats.consecutive_failures, 1);
-        app.state = State::Stopped;
+        app.state = State::default();
 
         // Ran longer than reset_after_ms before crashing again: streak resets, then this
         // failure brings it back to 1 rather than 2.
@@ -975,17 +1017,29 @@ mod restart_tests {
         let mut app = make_app(policy);
 
         app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
-        assert!(matches!(app.state, State::PendingRestart { .. }));
-        app.state = State::Stopped;
+        assert!(matches!(
+            app.state,
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline: Some(..),
+                ..
+            }))
+        ));
+        app.state = State::default();
 
         app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
-        assert!(matches!(app.state, State::PendingRestart { .. }));
-        app.state = State::Stopped;
+        assert!(matches!(
+            app.state,
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline: Some(..),
+                ..
+            }))
+        ));
+        app.state = State::default();
 
         // Third consecutive failure exceeds max_restart_attempts: give up, no more restarts.
         app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
         assert_eq!(app.runtime_stats.consecutive_failures, 3);
-        assert!(matches!(app.state, State::Stopped));
+        assert!(matches!(app.state, State::Stopped(..)));
     }
 
     #[test]
@@ -1027,7 +1081,10 @@ mod restart_tests {
         assert!(app.pending_restart_deadline().is_none());
         assert!(matches!(
             app.state,
-            State::Terminated(ReturnState::Abnormal { signal: 9 })
+            State::Stopped(Some(LastExecutionInfo {
+                restart_deadline: None,
+                cause: ReturnState::Abnormal { signal: 9 }
+            }))
         ));
     }
 }
