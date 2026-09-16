@@ -180,3 +180,33 @@ fn parse_cpu_stat_usec(stat: &str) -> u64 {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(0)
 }
+
+/// Blocks until `cgroup` reports no live processes left (`cgroup.events`'s `populated`
+/// field reaches 0), or `timeout` elapses. Returns whether the cgroup was confirmed empty.
+///
+/// `Cgroup::kill()` only asynchronously delivers SIGKILL: the write to `cgroup.kill` returns
+/// before the targeted processes actually exit, so a `Cgroup::delete()` issued right after it
+/// can still fail with EBUSY. Call this in between to wait for the kill to actually take effect.
+pub fn wait_for_cgroup_empty(cgroup: &Cgroup, timeout: std::time::Duration) -> bool {
+    let path = format!("/sys/fs/cgroup/{}/cgroup.events", cgroup.path());
+    let deadline = std::time::Instant::now() + timeout;
+
+    loop {
+        let populated = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents
+                .lines()
+                .find_map(|line| line.strip_prefix("populated "))
+                .map(|v| v.trim() != "0")
+                .unwrap_or(false),
+            Err(_) => return false,
+        };
+
+        if !populated {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}

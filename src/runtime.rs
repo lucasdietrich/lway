@@ -18,6 +18,7 @@ use thiserror::Error;
 use crate::{
     cgroups::{
         AppCgroupConfig, CgroupUsage, init_app_cgroup, read_cgroup_usage, spawn_into_cgroup,
+        wait_for_cgroup_empty,
     }, logger::Logger, restart::RestartPolicy, stats::AppStats, support::{
         mio_token_slab::MioTokenSlab,
         pipe::{Pipe, PipeReader},
@@ -555,58 +556,58 @@ impl AppRuntime {
 
                 let prog = CString::from_str(&params.prog)
                     .map_err(|e| format!("prog into CString failed: {}", e))?;
-            let args: Vec<CString> = params
-                .args
-                .iter()
+                let args: Vec<CString> = params
+                    .args
+                    .iter()
                     .map(|arg| {
                         CString::from_str(arg)
                             .map_err(|e| format!("arg into CString failed: {}", e))
                     })
                     .collect::<Result<Vec<CString>, String>>()?;
-            let mut argv: Vec<*const c_char> = args
-                .iter()
-                .map(|cstring| cstring.as_ptr() as *const c_char)
-                .collect();
-            // execve expects a null-terminated array
-            argv.push(std::ptr::null());
+                let mut argv: Vec<*const c_char> = args
+                    .iter()
+                    .map(|cstring| cstring.as_ptr() as *const c_char)
+                    .collect();
+                // execve expects a null-terminated array
+                argv.push(std::ptr::null());
 
                 let ret = unsafe { libc::setsid() };
                 to_ioresult(ret).map_err(|e| format!("setsid failed: {}", e))?;
 
-            // setgid must happen before setuid: once uid is dropped, permission to
-            // change gid is lost.
+                // setgid must happen before setuid: once uid is dropped, permission to
+                // change gid is lost.
 
-            let ret = unsafe { libc::setgid(params.gid) };
+                let ret = unsafe { libc::setgid(params.gid) };
                 to_ioresult(ret).map_err(|e| format!("setgid failed: {}", e))?;
 
-            let ret = unsafe { libc::setuid(params.uid) };
+                let ret = unsafe { libc::setuid(params.uid) };
                 to_ioresult(ret).map_err(|e| format!("setuid failed: {}", e))?;
 
-            // Build environment variables
-            let env: Vec<CString> = params
-                .env
-                .iter()
+                // Build environment variables
+                let env: Vec<CString> = params
+                    .env
+                    .iter()
                     .map(|env| {
                         CString::from_str(env)
                             .map_err(|e| format!("env into CString failed: {}", e))
                     })
                     .collect::<Result<Vec<CString>, String>>()?;
-            let mut envp: Vec<*const c_char> = env
-                .iter()
-                .map(|cstring| cstring.as_ptr() as *const c_char)
-                .collect();
-            envp.push(std::ptr::null());
+                let mut envp: Vec<*const c_char> = env
+                    .iter()
+                    .map(|cstring| cstring.as_ptr() as *const c_char)
+                    .collect();
+                envp.push(std::ptr::null());
 
-            // Set working directory if specified
+                // Set working directory if specified
                 set_current_cwd(&params.cwd).map_err(|e| format!("chdir failed: {}", e))?;
 
                 let _ret = unsafe {
-                libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())
-            };
-            let error = std::io::Error::last_os_error();
+                    libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())
+                };
+                let error = std::io::Error::last_os_error();
                 Err(format!("execve failed: {}", error))
             }
-            
+
             if let Err(e) = setup_child(params, pipe_stdout, pipe_stderr) {
                 eprintln!("{}", e);
             }
@@ -691,7 +692,19 @@ impl AppRuntime {
         poll.registry().deregister(&mut stderr_sourcefd)?;
         token_slab.free(self.tokens.stderr);
 
-        // pipe fds are automatically closed
+        // pidfd/pipe fds are OwnedFd, automatically closed on drop
+
+        // The tracked pid exited, but it may have left descendants behind (e.g. a wrapper
+        // script's child, or a process that double-forked/setsid'd to daemonize itself).
+        // Those aren't reachable by the process-group signals sent to the tracked pid, so
+        // kill the whole cgroup to make sure nothing from this app survives it.
+        if let Err(err) = self.cgroup.kill() {
+            log::warn!("Failed to cgroup-kill app {}: {}", self.pid, err);
+        } else if !wait_for_cgroup_empty(&self.cgroup, Duration::from_millis(200)) {
+            // SIGKILL delivery is async; delete() below may still fail if something
+            // (e.g. a process stuck in uninterruptible sleep) hasn't exited yet.
+            log::warn!("app {} cgroup still populated after kill", self.pid);
+        }
 
         if let Err(err) = self.cgroup.delete() {
             log::error!("Failed to delete app cgroup: {}", err);
