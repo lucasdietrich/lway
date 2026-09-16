@@ -31,8 +31,8 @@ const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 // running as root should keep this under /run.
 const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
 
-// Number of SIGINTs to tolerate before exiting
-const SIGINT_LIMIT: usize = 2;
+// Number of SIGINT signals to receive before killing (9) the process
+const SIGINT_THRESHOLD: usize = 2;
 
 pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 pub const SIGNALFD_TOKEN: Token = Token(1);
@@ -319,7 +319,7 @@ fn main() {
         }
 
         // If Ctrl+C (SIGINT) was received
-        if rt.sigint_count > SIGINT_LIMIT {
+        if rt.sigint_count >= SIGINT_THRESHOLD {
             log::info!("Sending SIGKILL to all child processes");
             for app in rt.apps.iter() {
                 if let Err(e) = app.sigkill() {
