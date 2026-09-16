@@ -46,12 +46,14 @@ pub struct AppCgroupConfig {
     pub memory_swap_limit: Option<i64>,
 }
 
+const LWAY_APP_CGROUP_PREFIX: &str = "";
+
 /// Create a child cgroup nested under the main cgroup and move `pid` into it.
 ///
 /// Tasks must live in leaf cgroups: cgroup v2's "no internal process constraint" forbids a
 /// cgroup from holding tasks directly once it delegates controllers to children.
-pub fn init_app_cgroup(name: &str, pid: libc::pid_t, config: &AppCgroupConfig) -> Cgroup {
-    let path = format!("{}/ly-{}", LWAY_CGROUP_NAME, name);
+pub fn init_app_cgroup(name: &str, config: &AppCgroupConfig) -> Cgroup {
+    let path = format!("{}/{}{}", LWAY_CGROUP_NAME, LWAY_APP_CGROUP_PREFIX, name);
     let hier = cgroups_rs::fs::hierarchies::auto();
 
     let app: Cgroup = CgroupBuilder::new(&path)
