@@ -1,9 +1,9 @@
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Delay strategy applied before a single restart attempt.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "strategy", rename_all = "snake_case")]
 pub enum RestartDelay {
     /// Don't restart the app for this outcome; it settles into `Terminated`.
@@ -61,7 +61,7 @@ impl RestartDelay {
 }
 
 /// Configures how and whether an app is restarted after it exits.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct RestartPolicy {
     pub on_success: RestartDelay,

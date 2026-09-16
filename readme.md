@@ -27,11 +27,11 @@
 - [x] automatically restart a service which crashes or exits unexpectedly
 - [x] oneshot mode for apps (don't restart them if they exit successfully)
 - [ ] setsid (create a new session leader for each app)
-- [ ] enrich restart strategies
-    - [ ] restart delay
-    - [ ] exponential backoff for restart
-    - [ ] restart on failure/success
-    - [ ] consecutive failures threshold for deactivation
+- [x] enrich restart strategies
+    - [x] restart delay
+    - [x] exponential backoff for restart
+    - [x] restart on failure/success
+    - [x] consecutive failures threshold for deactivation
 - [ ] improve handling of immediate failures:
     - [ ] command fails at start immediately
 - [ ] add starts groups, priority and dependencies
@@ -39,4 +39,5 @@
     - [ ] priority levels
     - [ ] dependency management
 - [ ] add daemon cli option to choose logger
-- [ ] add daemon cli option to tell to not exit when all is off
+- [x] add daemon cli option to tell to not exit when all is off
+- [ ] websocket for logging through web

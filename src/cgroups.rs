@@ -3,7 +3,7 @@ use cgroups_rs::fs::cgroup_builder::*;
 use cgroups_rs::fs::cpu::CpuController;
 use cgroups_rs::fs::memory::MemController;
 use cgroups_rs::fs::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 const LWAY_CGROUP_NAME: &str = "lway";
 const LWAY_MEMORY_HARD_LIMIT: i64 = 1024 * 1024 * 1024; // 500 MiB
@@ -37,12 +37,17 @@ pub fn init_main_cgroup() -> Cgroup {
     main
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppCgroupConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_weight: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub io_weight: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_hard_limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_soft_limit: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory_swap_limit: Option<i64>,
 }
 

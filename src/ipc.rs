@@ -17,7 +17,9 @@ use mio::net::{UnixListener, UnixStream};
 use mio::{Interest, Poll, Token};
 use thiserror::Error;
 
-use crate::protocol::{AppInfo, Request, Response, StartFailure};
+use crate::protocol::{
+    AppConfigSnapshot, AppDebugInfo, AppInfo, Request, Response, StartFailure, StopFailure,
+};
 use crate::runtime::App;
 use crate::support::mio_token_slab::MioTokenSlab;
 use crate::UNIX_LISTENER_TOKEN;
@@ -174,10 +176,22 @@ impl Server {
                 Ok(Request::List) => Response::AppList {
                     apps: apps.iter().map(app_info).collect(),
                 },
-                Ok(Request::Stats { name }) => match apps.iter().find(|app| app.name() == name) {
-                    Some(app) => Response::AppStats {
+                Ok(Request::Info { name }) => match apps.iter().find(|app| app.name() == name) {
+                    Some(app) => Response::Info {
                         name: app.name().to_string(),
+                        info: app_info(app),
                         stats: app.stats(),
+                        debug: app_debug_info(app),
+                    },
+                    None => Response::AppNotFound {
+                        name,
+                        apps: apps.iter().map(|app| app.name().to_string()).collect(),
+                    },
+                },
+                Ok(Request::Config { name }) => match apps.iter().find(|app| app.name() == name) {
+                    Some(app) => Response::Config {
+                        name: app.name().to_string(),
+                        config: app_config_snapshot(app),
                     },
                     None => Response::AppNotFound {
                         name,
@@ -201,7 +215,7 @@ impl Server {
                 Ok(Request::StartAll) => {
                     let mut started = Vec::new();
                     let mut failed = Vec::new();
-                    for app in apps.iter_mut().filter(|app| !app.is_running()) {
+                    for app in apps.iter_mut() {
                         match app.start(poll, token_slab) {
                             Ok(()) => started.push(app.name().to_string()),
                             Err(e) => failed.push(StartFailure {
@@ -228,6 +242,20 @@ impl Server {
                             apps: apps.iter().map(|app| app.name().to_string()).collect(),
                         },
                     }
+                }
+                Ok(Request::StopAll { force }) => {
+                    let mut stopped = Vec::new();
+                    let mut failed = Vec::new();
+                    for app in apps.iter_mut() {
+                        match app.stop(force) {
+                            Ok(_) => stopped.push(app.name().to_string()),
+                            Err(e) => failed.push(StopFailure {
+                                name: app.name().to_string(),
+                                message: e.to_string(),
+                            }),
+                        }
+                    }
+                    Response::StoppedAll { stopped, failed }
                 }
                 Err(e) => Response::Error {
                     message: e.to_string(),
@@ -332,5 +360,28 @@ fn app_info(app: &App) -> AppInfo {
         oneshot: app.is_oneshot(),
         cpu_weight: cgroup.cpu_weight,
         io_weight: cgroup.io_weight,
+        runtime: stats.uptime.or(stats.last_run_duration),
+    }
+}
+
+fn app_debug_info(app: &App) -> AppDebugInfo {
+    AppDebugInfo {
+        cgroup_config: app.cgroup_config().clone(),
+        cgroup_path: app.cgroup_path(),
+    }
+}
+
+fn app_config_snapshot(app: &App) -> AppConfigSnapshot {
+    AppConfigSnapshot {
+        name: app.name().to_string(),
+        command: app.command(),
+        workdir: app.cwd().display().to_string(),
+        uid: app.uid(),
+        gid: app.gid(),
+        env: app.env().to_vec(),
+        oneshot: app.is_oneshot(),
+        autostart: app.autostart(),
+        restart: app.restart_policy().clone(),
+        cgroup: app.cgroup_config().clone(),
     }
 }

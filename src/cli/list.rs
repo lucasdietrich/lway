@@ -6,7 +6,7 @@ use crate::ipc::{IpcError, Result};
 use crate::protocol::{AppInfo, Request, Response};
 use crate::support::uidgid::{get_groupname, get_username};
 
-use super::{format_bytes, send_request};
+use super::{format_bytes, format_duration_compact, format_id, send_request};
 
 /// Connects to the daemon's control socket, sends a `List` request and
 /// returns the reported apps. Blocking: this is a short-lived one-shot call.
@@ -21,19 +21,22 @@ pub fn list_apps(socket_path: &Path) -> Result<Vec<AppInfo>> {
 
 /// Prints `apps` as a simple column-aligned table.
 pub fn print_apps_table(apps: &[AppInfo]) {
-    const HEADERS: [&str; 14] = [
-        "NAME", "STATE", "PID", "COMMAND", "CWD", "UID", "GID", "REST", "LOG", "MEM", "IO (R/W)",
-        "ONESHOT", "CPU_W", "IO_W",
+    const HEADERS: [&str; 15] = [
+        "NAME", "STATE", "PID", "RUNTIME", "COMMAND", "CWD", "UID", "GID", "REST", "LOG", "MEM",
+        "IO (R/W)", "ONESHOT", "CPU_W", "IO_W",
     ];
 
     let dash = || "-".to_string();
-    let rows: Vec<[String; 14]> = apps
+    let rows: Vec<[String; 15]> = apps
         .iter()
         .map(|app| {
             [
                 app.name.clone(),
                 app.state.clone(),
                 app.pid.map(|p| p.to_string()).unwrap_or_else(dash),
+                app.runtime
+                    .map(format_duration_compact)
+                    .unwrap_or_else(dash),
                 app.command.clone(),
                 app.cwd.clone(),
                 format_id(app.uid, get_username),
@@ -60,7 +63,7 @@ pub fn print_apps_table(apps: &[AppInfo]) {
         }
     }
 
-    let print_row = |cells: &[String; 14]| {
+    let print_row = |cells: &[String; 15]| {
         let line: Vec<String> = cells
             .iter()
             .zip(widths.iter())
@@ -72,13 +75,5 @@ pub fn print_apps_table(apps: &[AppInfo]) {
     print_row(&HEADERS.map(String::from));
     for row in &rows {
         print_row(row);
-    }
-}
-
-/// Formats a uid/gid as `"1000 (name)"`, falling back to the bare id or `"-"`.
-fn format_id(id: u32, resolve_name: impl Fn(u32) -> Option<String>) -> String {
-    match resolve_name(id) {
-        Some(name) => format!("{} ({})", name, id),
-        None => id.to_string(),
     }
 }

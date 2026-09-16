@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long = "daemon")]
     daemon: bool,
 
+    /// Keep the daemon (and its control socket) running even after all supervised apps have terminated
+    #[arg(short = 'k', long = "keep-running")]
+    keep_running: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -67,8 +71,13 @@ struct Cli {
 enum Command {
     /// List apps supervised by the running daemon
     List,
-    /// Show runtime statistics for a single app
-    Stats {
+    /// Show full details (list info + stats + debug info) for a single app
+    Info {
+        /// Name of the app to query
+        name: String,
+    },
+    /// Rebuild the full effective YAML configuration of a single app
+    Config {
         /// Name of the app to query
         name: String,
     },
@@ -83,6 +92,12 @@ enum Command {
     Stop {
         /// Name of the app to stop
         name: String,
+        /// Send SIGKILL instead of SIGTERM
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+    },
+    /// Stop every currently running app
+    StopAll {
         /// Send SIGKILL instead of SIGTERM
         #[arg(short = 'f', long = "force")]
         force: bool,
@@ -123,10 +138,12 @@ fn main() {
         });
         match command {
             Command::List => run_list_client(&socket_path),
-            Command::Stats { name } => run_stats_client(&socket_path, &name),
+            Command::Info { name } => run_info_client(&socket_path, &name),
+            Command::Config { name } => run_config_client(&socket_path, &name),
             Command::Start { name } => run_start_client(&socket_path, &name),
             Command::StartAll => run_start_all_client(&socket_path),
             Command::Stop { name, force } => run_stop_client(&socket_path, &name, force),
+            Command::StopAll { force } => run_stop_all_client(&socket_path, force),
         }
         return;
     }
@@ -336,7 +353,7 @@ fn main() {
                 }
             }
         } else if rt.sigint_count > 0 {
-            log::info!("Requesting graceful shutdown of all child processes");
+            log::info!("Gracefully shutting down all child processes");
             for app in rt.apps.iter_mut() {
                 if let Err(e) = app.stop(false) {
                     log::error!("Failed to stop {}: {}", app, e);
@@ -344,10 +361,11 @@ fn main() {
             }
         }
 
-        if rt
-            .apps
-            .iter()
-            .all(|app| !app.is_running() && app.pending_restart_deadline().is_none())
+        if (!cli.keep_running || rt.sigint_count > 0)
+            && rt
+                .apps
+                .iter()
+                .all(|app| !app.is_running() && app.pending_restart_deadline().is_none())
         {
             log::info!("all apps returned, exiting ...");
             break;
@@ -369,10 +387,21 @@ fn run_list_client(socket_path: &PathBuf) {
     }
 }
 
-/// Connects to a running daemon, requests an app's stats and prints them.
-fn run_stats_client(socket_path: &PathBuf, name: &str) {
-    match cli::stats::get_stats(socket_path, name) {
-        Ok(stats) => cli::stats::print_stats(name, &stats),
+/// Connects to a running daemon, requests an app's full details and prints them.
+fn run_info_client(socket_path: &PathBuf, name: &str) {
+    match cli::info::get_info(socket_path, name) {
+        Ok(full) => cli::info::print_info(name, &full),
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Connects to a running daemon, requests an app's config and prints it as YAML.
+fn run_config_client(socket_path: &PathBuf, name: &str) {
+    match cli::config::get_config(socket_path, name) {
+        Ok(config) => cli::config::print_config(config),
         Err(e) => {
             eprintln!("error: {}", e);
             std::process::exit(1);
@@ -415,6 +444,22 @@ fn run_stop_client(socket_path: &PathBuf, name: &str, force: bool) {
                 println!("stopped {}", name);
             } else {
                 println!("{} was not running", name);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Connects to a running daemon and requests that every running app be stopped.
+fn run_stop_all_client(socket_path: &PathBuf, force: bool) {
+    match cli::stop::stop_all_apps(socket_path, force) {
+        Ok((stopped, failed)) => {
+            cli::stop::print_stop_all_result(&stopped, &failed);
+            if !failed.is_empty() {
+                std::process::exit(1);
             }
         }
         Err(e) => {

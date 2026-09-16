@@ -78,6 +78,8 @@ struct AppRuntimeStats {
     stderr_bytes: u64,
     /// Sum of the durations of all completed runs, excluding the current one.
     total_uptime: Duration,
+    /// Duration of the most recently completed run, if any.
+    last_run_duration: Option<Duration>,
 }
 
 pub struct App {
@@ -268,10 +270,7 @@ impl App {
         match &self.state {
             State::Running(..) => "running".to_string(),
             State::Stopped(None) => "stopped".to_string(),
-            State::Stopped(Some(LastExecutionInfo {
-                cause,
-                restart_deadline,
-            })) => match cause {
+            State::Stopped(Some(LastExecutionInfo { cause, .. })) => match cause {
                 ReturnState::Abnormal { signal } => format!(
                     "abnormal(signal {})",
                     signal_name(*signal as usize).unwrap_or("UNKNOWN")
@@ -306,6 +305,26 @@ impl App {
         &self.params.cgroup
     }
 
+    pub fn autostart(&self) -> bool {
+        self.params.autostart
+    }
+
+    pub fn env(&self) -> &[String] {
+        &self.params.env
+    }
+
+    pub fn restart_policy(&self) -> &RestartPolicy {
+        &self.params.restart
+    }
+
+    /// Full cgroupfs path of the app's cgroup, if it's currently running.
+    pub fn cgroup_path(&self) -> Option<String> {
+        match &self.state {
+            State::Running(rt) => Some(format!("/sys/fs/cgroup/{}", rt.cgroup.path())),
+            _ => None,
+        }
+    }
+
     pub fn stats(&self) -> AppStats {
         let (uptime, cgroup_usage) = match &self.state {
             State::Running(rt) => (Some(rt.started_at.elapsed()), read_cgroup_usage(&rt.cgroup)),
@@ -315,6 +334,7 @@ impl App {
         AppStats {
             uptime,
             total_uptime: self.runtime_stats.total_uptime,
+            last_run_duration: self.runtime_stats.last_run_duration,
             restart_count: self.runtime_stats.restart_count,
             last_exit_code: self.runtime_stats.last_exit_code,
             last_exit_reason: self.runtime_stats.last_exit_reason.clone(),
@@ -435,6 +455,7 @@ impl App {
 
                 let uptime = rt.started_at.elapsed();
                 self.runtime_stats.total_uptime += uptime;
+                self.runtime_stats.last_run_duration = Some(uptime);
 
                 rt.stop(poll, token_slab)
                     .expect("Failed to stop app runtime");

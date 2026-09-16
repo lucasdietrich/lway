@@ -11,6 +11,8 @@ pub struct AppStats {
     pub uptime: Option<Duration>,
     /// Sum of the durations of all completed runs, excluding the current one.
     pub total_uptime: Duration,
+    /// Duration of the most recently completed run, if any.
+    pub last_run_duration: Option<Duration>,
     pub restart_count: u32,
     pub last_exit_code: Option<i32>,
     pub last_exit_reason: Option<String>,
