@@ -10,16 +10,21 @@ use std::{
 
 use cgroups_rs::fs::Cgroup;
 use libc::{
-    STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG, WTERMSIG, c_char, dup2, pid_t, waitpid,
+    c_char, dup2, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
+    WIFSIGNALED, WNOHANG, WTERMSIG,
 };
 use mio::unix::SourceFd;
 use thiserror::Error;
 
 use crate::{
     cgroups::{
-        AppCgroupConfig, CgroupUsage, init_app_cgroup, read_cgroup_usage, spawn_into_cgroup,
-        wait_for_cgroup_empty,
-    }, logger::Logger, restart::RestartPolicy, stats::AppStats, support::{
+        init_app_cgroup, read_cgroup_usage, spawn_into_cgroup, wait_for_cgroup_empty,
+        AppCgroupConfig, CgroupUsage,
+    },
+    logger::Logger,
+    restart::RestartPolicy,
+    stats::AppStats,
+    support::{
         mio_token_slab::MioTokenSlab,
         pipe::{Pipe, PipeReader},
         signal::signal_name,
@@ -36,6 +41,8 @@ pub enum AppErr {
     Runtime(#[from] AppRuntimeError),
     #[error("App already running")]
     AlreadyRunning,
+    #[error("App not running")]
+    NotRunning,
 }
 
 // remake <'a>
@@ -78,6 +85,8 @@ pub struct App {
     params: AppParams,
     state: State,
     runtime_stats: AppRuntimeStats,
+    /// Set by `stop()` to suppress auto-restart of an app the user explicitly stopped.
+    stop_requested: bool,
 }
 
 impl App {
@@ -99,18 +108,52 @@ impl App {
             state,
             params,
             runtime_stats: AppRuntimeStats::default(),
+            stop_requested: false,
         })
     }
 
     pub fn start(&mut self, poll: &mio::Poll, token_slab: &mut MioTokenSlab) -> Result<(), AppErr> {
-        if let State::Stopped = self.state {
-            let runtime = AppRuntime::start(&self.params, &poll, token_slab)?;
-            self.state = State::Running(runtime);
-            self.runtime_stats.consecutive_failures = 0;
-            Ok(())
-        } else {
-            Err(AppErr::AlreadyRunning)
+        match self.state {
+            State::Stopped | State::Terminated(..) => {
+                let runtime = AppRuntime::start(&self.params, &poll, token_slab)?;
+                self.state = State::Running(runtime);
+                self.runtime_stats.consecutive_failures = 0;
+                self.stop_requested = false;
+                Ok(())
+            }
+            State::Running(..) | State::PendingRestart { .. } => Err(AppErr::AlreadyRunning),
         }
+    }
+
+    /// Stops a running (or pending-restart) app: sends SIGTERM, or SIGKILL if `force` is set.
+    /// Also cancels any pending restart and suppresses auto-restart once the app exits.
+    ///
+    /// Returns `Ok(true)` if the app was running and is now being stopped.
+    /// Returns `Ok(false)` if the app was not running.
+    /// Returns an `Err(AppErr)` if there was an error sending the termination signal.
+    pub fn stop(&mut self, force: bool) -> Result<bool, AppErr> {
+        match &self.state {
+            State::Running(rt) => {
+                let result = if force {
+                    rt.send_sigkill()
+                } else {
+                    rt.send_sigterm()
+                };
+                self.stop_requested = true;
+                result.map_err(AppRuntimeError::from)?;
+                Ok(true)
+            }
+            State::PendingRestart { cause, .. } => {
+                self.stop_requested = true;
+                self.state = State::Terminated(*cause);
+                Ok(false)
+            }
+            State::Stopped | State::Terminated(..) => Ok(false),
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.state.is_running()
     }
 
     /// Deadline at which a scheduled restart should be attempted, if one is pending.
@@ -384,7 +427,7 @@ impl App {
                 self.state = State::Terminated(return_state);
 
                 // evaluate the restart of the application
-                if try_restart && !self.params.oneshot {
+                if try_restart && !self.params.oneshot && !self.stop_requested {
                     self.schedule_restart(return_state, uptime);
                 }
             }
@@ -412,22 +455,6 @@ impl App {
                 Err(_) => break,
             }
         }
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.state.is_running()
-    }
-
-    pub fn sigterm(&self) -> io::Result<()> {
-        self.state
-            .as_runtime()
-            .map_or(Ok(()), |app_runtime| app_runtime.send_sigterm())
-    }
-
-    pub fn sigkill(&self) -> io::Result<()> {
-        self.state
-            .as_runtime()
-            .map_or(Ok(()), |app_runtime| app_runtime.send_sigkill())
     }
 }
 
@@ -715,23 +742,34 @@ impl AppRuntime {
         Ok(())
     }
 
-    pub fn send_sigterm(&self) -> io::Result<()> {
-        // setsid() made this app its own process group leader (pgid == pid), so
-        // signal the whole group to also reach children it forked (e.g. shell scripts).
-        let ret = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) };
-        log::info!("app {} kill SIGTERM -> {}", self.pid, ret);
-        to_ioresult(ret)?;
+    fn send_signal(&self, signal: libc::c_int) -> io::Result<()> {
+        let ret = unsafe { libc::kill(self.pid as libc::pid_t, signal) };
+        log::info!(
+            "app {} kill {} {} -> {}",
+            self.pid,
+            signal,
+            signal_name(signal as usize).unwrap_or("UNKNOWN"),
+            ret
+        );
+        let result = to_ioresult(ret);
+        if let Err(err) = &result {
+            log::error!(
+                "Failed to send signal {} to app {}: {}",
+                signal,
+                self.pid,
+                err
+            );
+        }
+        result?;
         Ok(())
     }
 
-    pub fn send_sigkill(&self) -> io::Result<()> {
-        let ret = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
-        log::info!("app {} SIGKILL -> {}", self.pid, ret);
-        if let Err(err) = to_ioresult(ret) {
-            log::error!("Failed to send SIGKILL to app {}: {}", self.pid, err);
-        }
+    pub fn send_sigterm(&self) -> io::Result<()> {
+        self.send_signal(libc::SIGTERM)
+    }
 
-        Ok(())
+    pub fn send_sigkill(&self) -> io::Result<()> {
+        self.send_signal(libc::SIGKILL)
     }
 }
 
@@ -808,6 +846,7 @@ mod restart_tests {
             params: make_params(restart),
             state: State::Stopped,
             runtime_stats: AppRuntimeStats::default(),
+            stop_requested: false,
         }
     }
 

@@ -38,3 +38,5 @@
     - [ ] start order
     - [ ] priority levels
     - [ ] dependency management
+- [ ] add daemon cli option to choose logger
+- [ ] add daemon cli option to tell to not exit when all is off

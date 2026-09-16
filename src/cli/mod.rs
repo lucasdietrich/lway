@@ -11,6 +11,7 @@ use crate::protocol::{Request, Response};
 pub mod list;
 pub mod start;
 pub mod stats;
+pub mod stop;
 
 /// Connects to the daemon's control socket, sends `request` and returns its
 /// single-line response. Blocking: this is a short-lived one-shot call.

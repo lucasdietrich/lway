@@ -212,6 +212,23 @@ impl Server {
                     }
                     Response::StartedAll { started, failed }
                 }
+                Ok(Request::Stop { name, force }) => {
+                    match apps.iter_mut().find(|app| app.name() == name) {
+                        Some(app) => match app.stop(force) {
+                            Ok(app_was_running) => Response::Stopped {
+                                name,
+                                app_was_running,
+                            },
+                            Err(e) => Response::Error {
+                                message: e.to_string(),
+                            },
+                        },
+                        None => Response::AppNotFound {
+                            name,
+                            apps: apps.iter().map(|app| app.name().to_string()).collect(),
+                        },
+                    }
+                }
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },

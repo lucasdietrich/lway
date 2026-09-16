@@ -79,6 +79,14 @@ enum Command {
     },
     /// Start every currently stopped app
     StartAll,
+    /// Stop a running app
+    Stop {
+        /// Name of the app to stop
+        name: String,
+        /// Send SIGKILL instead of SIGTERM
+        #[arg(short = 'f', long = "force")]
+        force: bool,
+    },
 }
 
 pub struct Runtime {
@@ -118,6 +126,7 @@ fn main() {
             Command::Stats { name } => run_stats_client(&socket_path, &name),
             Command::Start { name } => run_start_client(&socket_path, &name),
             Command::StartAll => run_start_all_client(&socket_path),
+            Command::Stop { name, force } => run_stop_client(&socket_path, &name, force),
         }
         return;
     }
@@ -320,17 +329,17 @@ fn main() {
 
         // If Ctrl+C (SIGINT) was received
         if rt.sigint_count >= SIGINT_THRESHOLD {
-            log::info!("Sending SIGKILL to all child processes");
-            for app in rt.apps.iter() {
-                if let Err(e) = app.sigkill() {
-                    log::error!("Failed to send SIGKILL to {}: {}", app, e);
+            log::info!("Forcefully shutting down all child processes");
+            for app in rt.apps.iter_mut() {
+                if let Err(e) = app.stop(true) {
+                    log::error!("Failed to stop {}: {}", app, e);
                 }
             }
         } else if rt.sigint_count > 0 {
-            log::info!("Sending SIGTERM to all child processes");
-            for app in rt.apps.iter() {
-                if let Err(e) = app.sigterm() {
-                    log::error!("Failed to send SIGTERM to {}: {}", app, e);
+            log::info!("Requesting graceful shutdown of all child processes");
+            for app in rt.apps.iter_mut() {
+                if let Err(e) = app.stop(false) {
+                    log::error!("Failed to stop {}: {}", app, e);
                 }
             }
         }
@@ -389,6 +398,23 @@ fn run_start_all_client(socket_path: &PathBuf) {
             cli::start::print_start_all_result(&started, &failed);
             if !failed.is_empty() {
                 std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Connects to a running daemon and requests that a running app be stopped.
+fn run_stop_client(socket_path: &PathBuf, name: &str, force: bool) {
+    match cli::stop::stop_app(socket_path, name, force) {
+        Ok(app_was_running) => {
+            if app_was_running {
+                println!("stopped {}", name);
+            } else {
+                println!("{} was not running", name);
             }
         }
         Err(e) => {

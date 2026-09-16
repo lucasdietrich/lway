@@ -31,10 +31,8 @@ pub fn start_all_apps(socket_path: &Path) -> Result<(Vec<String>, Vec<StartFailu
     match response {
         Response::StartedAll { started, failed } => Ok((started, failed)),
         Response::Error { message } => Err(IpcError::Daemon(message)),
-        Response::AppList { .. } | Response::AppStats { .. } | Response::Started { .. } => {
-            Err(IpcError::Daemon("unexpected response".to_string()))
-        }
         Response::AppNotFound { name, apps } => Err(IpcError::AppNotFound { name, apps }),
+        _ => Err(IpcError::Daemon("unexpected response".to_string())),
     }
 }
 

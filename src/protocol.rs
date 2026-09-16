@@ -16,6 +16,8 @@ pub enum Request {
     Start { name: String },
     /// Start every currently stopped app.
     StartAll,
+    /// Stop a running app: SIGTERM, or SIGKILL if `force` is set.
+    Stop { name: String, force: bool },
 }
 
 /// A single app that failed to start as part of a `StartAll` request.
@@ -62,6 +64,10 @@ pub enum Response {
     StartedAll {
         started: Vec<String>,
         failed: Vec<StartFailure>,
+    },
+    Stopped {
+        name: String,
+        app_was_running: bool,
     },
     /// Requested app doesn't exist; `apps` lists the currently supervised names.
     AppNotFound {
