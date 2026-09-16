@@ -110,7 +110,7 @@ int main(int argc, char *argv[]) {
 
     // Ctrl +C
     signal(SIGINT, sigint);
-    signal(SIGTERM, sigterm);
+    // signal(SIGTERM, sigterm);
 
     // // Close stderr
     // close(STDERR_FILENO);

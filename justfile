@@ -56,3 +56,8 @@ writer:
   . ./.env && bear -- $CC apps/writer.c -o apps/writer
   ssh {{target}} "mkdir -p /var/amy"
   scp apps/writer {{target}}:/var/amy/
+
+ch:
+  . ./.env && bear -- $CC apps/ch.c -o apps/ch
+  ssh {{target}} "mkdir -p /var/amy"
+  scp apps/ch {{target}}:/var/amy/

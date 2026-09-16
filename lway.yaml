@@ -1,5 +1,12 @@
 apps_dir: .
 apps:
+  - name: ch
+    command: /var/amy/ch
+    oneshot: true
+  - name: s1
+    command: /home/root/s.sh
+  - name: sh
+    command: /bin/sh
   - name: id-root
     command: /usr/bin/id
     oneshot: true
@@ -11,46 +18,48 @@ apps:
         strategy: constant
         delay_ms: 1000
       max_restart_attempts: 3
-  # - name: app
-  #   command: /var/amy/app 10
-  # - name: test1
-  #   command: /var/amy/test -M 100
-  #   cpu_weight: 100
-  # - name: test2
-  #   command: /var/amy/test -M 100
-  #   cpu_weight: 10
-  # - name: test3
-  #   command: /var/amy/test -M 100
-  #   cpu_weight: 5
-  #   io_weight: 100
-  #   user: www
-  #   group: www
-  #   workdir: /tmp
-  #   env:
-  #     MYVAR1: value1
-  #   autostart: false
-  # - name: write1
-  #   command: /var/amy/writer /var/amy/f1.txt -s 64
-  # - name: write2
-  #   command: /var/amy/writer /var/amy/f2.txt -s 128
-
-
-
-
-  # - name: default-env
-  #   command: /usr/bin/env
-  # - name: custom-env
-  #   command: /usr/bin/env
-  #   env:
-  #     MYVAR1: value1
-  #     MYVAR2: value2
-  #     MYVAR3:
-  # - name: id-user
-  #   command: /usr/bin/id
-  #   user: 1001
-  #   gid: 1001
-  # - name: "app1"
-  #   command: "/home/root/app 10"
-  #   workdir: /home/root
-  # - name: invalid
-  #   command: invalid
+  - name: lway-cli
+    command: /home/root/lway list
+    restart:
+      on_success:
+        strategy: constant
+        delay_ms: 1000
+  - name: app
+    command: /var/amy/app 10
+  - name: test1
+    command: /var/amy/test -M 100
+    cpu_weight: 100
+  - name: test2
+    command: /var/amy/test -M 100
+    cpu_weight: 10
+  - name: test3
+    command: /var/amy/test -M 100
+    cpu_weight: 5
+    io_weight: 100
+    user: www
+    group: www
+    workdir: /tmp
+    env:
+      MYVAR1: value1
+    autostart: false
+  - name: write1
+    command: /var/amy/writer /var/amy/f1.txt -s 64
+  - name: write2
+    command: /var/amy/writer /var/amy/f2.txt -s 128
+  - name: default-env
+    command: /usr/bin/env
+  - name: custom-env
+    command: /usr/bin/env
+    env:
+      MYVAR1: value1
+      MYVAR2: value2
+      MYVAR3:
+  - name: id-user
+    command: /usr/bin/id
+    user: 1001
+    gid: 1001
+  - name: "app1"
+    command: "/home/root/app 10"
+    workdir: /home/root
+  - name: invalid
+    command: invalid
