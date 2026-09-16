@@ -1,8 +1,8 @@
 use std::{
     ffi::{c_int, CString},
     fmt::Display,
-    io::{self, Error, Read},
-    os::fd::{AsRawFd, RawFd},
+    io::{self, Read},
+    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -10,18 +10,15 @@ use std::{
 
 use cgroups_rs::fs::Cgroup;
 use libc::{
-    c_char, dup2, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
-    WIFSIGNALED, WNOHANG, WTERMSIG,
+    STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG, WTERMSIG, c_char, dup2, pid_t, waitpid,
 };
 use mio::unix::SourceFd;
 use thiserror::Error;
 
 use crate::{
-    cgroups::{init_app_cgroup, read_cgroup_usage, AppCgroupConfig, CgroupUsage},
-    logger::Logger,
-    restart::RestartPolicy,
-    stats::AppStats,
-    support::{
+    cgroups::{
+        AppCgroupConfig, CgroupUsage, init_app_cgroup, read_cgroup_usage, spawn_into_cgroup,
+    }, logger::Logger, restart::RestartPolicy, stats::AppStats, support::{
         mio_token_slab::MioTokenSlab,
         pipe::{Pipe, PipeReader},
         signal::signal_name,
@@ -350,8 +347,7 @@ impl App {
                 });
 
                 let terminated = State::Terminated(return_state);
-                let State::Running(mut rt) = std::mem::replace(&mut self.state, terminated)
-                else {
+                let State::Running(mut rt) = std::mem::replace(&mut self.state, terminated) else {
                     unreachable!();
                 };
 
@@ -497,14 +493,14 @@ fn poll_pid(pid: pid_t) -> Option<ReturnState> {
         // child still running
         None
     } else {
-        panic!("waitpid failed")
+        panic!("waitpid failed ret: {}", ret)
     }
 }
 
 #[derive(Debug, Error)]
 pub enum AppRuntimeError {
     #[error("Fork failed {0}")]
-    ForkFailed(i32),
+    ForkFailed(std::io::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Token allocation failed")]
@@ -517,7 +513,7 @@ struct AppRuntime {
     cgroup: Cgroup,
     stdout: PipeReader,
     stderr: PipeReader,
-    pidfd: RawFd,
+    pidfd: OwnedFd,
     tokens: AppRtTokens,
     started_at: Instant,
 
@@ -531,25 +527,42 @@ impl AppRuntime {
         poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
     ) -> Result<Self, AppRuntimeError> {
-        let pipe_stdout: Pipe = Pipe::new().expect("pipe stdout");
+        let pipe_stdout = Pipe::new().expect("pipe stdout");
         let pipe_stderr = Pipe::new().expect("pipe stderr");
 
-        let ret = unsafe { libc::fork() };
+        let cgroup = init_app_cgroup(&params.name, &params.cgroup);
+        let cgroup_full_path = format!("/sys/fs/cgroup/{}", cgroup.path()); // TODO find a better way to obtain this full path
 
-        if ret == 0 {
+        let pid = spawn_into_cgroup(&cgroup_full_path).map_err(AppRuntimeError::ForkFailed)?;
+        if pid == 0 {
             // child
-            let stdout = pipe_stdout.into_write_fd()?;
-            fd_dup(stdout, STDOUT_FILENO)?;
+            fn setup_child(
+                params: &AppParams,
+                pipe_stdout: Pipe,
+                pipe_stderr: Pipe,
+            ) -> Result<(), String> {
+                let stdout = pipe_stdout
+                    .into_write_fd()
+                    .map_err(|e| format!("stdout into_write_fd failed: {}", e))?;
+                fd_dup(stdout, STDOUT_FILENO)
+                    .map_err(|e| format!("fd_dup stdout failed: {}", e))?;
 
-            let stderr = pipe_stderr.into_write_fd()?;
-            fd_dup(stderr, STDERR_FILENO)?;
+                let stderr = pipe_stderr
+                    .into_write_fd()
+                    .map_err(|e| format!("stderr into_write_fd failed: {}", e))?;
+                fd_dup(stderr, STDERR_FILENO)
+                    .map_err(|e| format!("fd_dup stderr failed: {}", e))?;
 
-            let prog = CString::from_str(&params.prog).expect("app name");
+                let prog = CString::from_str(&params.prog)
+                    .map_err(|e| format!("prog into CString failed: {}", e))?;
             let args: Vec<CString> = params
                 .args
                 .iter()
-                .map(|arg| CString::from_str(arg).expect("arg"))
-                .collect();
+                    .map(|arg| {
+                        CString::from_str(arg)
+                            .map_err(|e| format!("arg into CString failed: {}", e))
+                    })
+                    .collect::<Result<Vec<CString>, String>>()?;
             let mut argv: Vec<*const c_char> = args
                 .iter()
                 .map(|cstring| cstring.as_ptr() as *const c_char)
@@ -557,43 +570,27 @@ impl AppRuntime {
             // execve expects a null-terminated array
             argv.push(std::ptr::null());
 
-            // let ret = unsafe {
-            //     libc::setsid()
-            // };
-            // if ret == -1 {
-            //     let error = std::io::Error::last_os_error();
-            //     log::error!("setsid failed: {}", error);
-            //     return Err(AppErr::Io(error));
-            // }
-
-            // Set uid and gid if specified
-            // let ret = unsafe { libc::setgroups(0, std::ptr::null()) };
-            // to_ioresult(ret).map_err(|e| {
-            //     log::error!("setgroups failed: {}", e);
-            //     AppErr::Io(e)
-            // })?;
+                let ret = unsafe { libc::setsid() };
+                to_ioresult(ret).map_err(|e| format!("setsid failed: {}", e))?;
 
             // setgid must happen before setuid: once uid is dropped, permission to
             // change gid is lost.
 
             let ret = unsafe { libc::setgid(params.gid) };
-            to_ioresult(ret).map_err(|e| {
-                eprintln!("setgid failed: {}", e);
-                AppRuntimeError::Io(e)
-            })?;
+                to_ioresult(ret).map_err(|e| format!("setgid failed: {}", e))?;
 
             let ret = unsafe { libc::setuid(params.uid) };
-            to_ioresult(ret).map_err(|e| {
-                eprintln!("setuid failed: {}", e);
-                AppRuntimeError::Io(e)
-            })?;
+                to_ioresult(ret).map_err(|e| format!("setuid failed: {}", e))?;
 
             // Build environment variables
             let env: Vec<CString> = params
                 .env
                 .iter()
-                .map(|env| CString::from_str(env).expect("env"))
-                .collect();
+                    .map(|env| {
+                        CString::from_str(env)
+                            .map_err(|e| format!("env into CString failed: {}", e))
+                    })
+                    .collect::<Result<Vec<CString>, String>>()?;
             let mut envp: Vec<*const c_char> = env
                 .iter()
                 .map(|cstring| cstring.as_ptr() as *const c_char)
@@ -601,29 +598,30 @@ impl AppRuntime {
             envp.push(std::ptr::null());
 
             // Set working directory if specified
-            set_current_cwd(&params.cwd).map_err(|e| {
-                eprintln!("chdir failed: {}", e);
-                AppRuntimeError::Io(e)
-            })?;
+                set_current_cwd(&params.cwd).map_err(|e| format!("chdir failed: {}", e))?;
 
-            let ret = unsafe {
+                let _ret = unsafe {
                 libc::execve(prog.as_ptr() as *const c_char, argv.as_ptr(), envp.as_ptr())
             };
             let error = std::io::Error::last_os_error();
-            eprintln!("execve returned {} errno: {}", ret, error,);
+                Err(format!("execve failed: {}", error))
+            }
             
-            // Exit the child process with failure status
+            if let Err(e) = setup_child(params, pipe_stdout, pipe_stderr) {
+                eprintln!("{}", e);
+            }
             unsafe { libc::exit(libc::EXIT_FAILURE) }
-        } else if ret > 0 {
-            let pid = ret as libc::pid_t;
-            let cgroup = init_app_cgroup(&params.name, pid, &params.cgroup);
-
+        } else {
+            // parent process
             let ret =
                 unsafe { libc::syscall(libc::SYS_pidfd_open, pid, libc::PIDFD_NONBLOCK) } as c_int;
-            let pidfd = to_ioresult(ret).map_err(|e| {
+            let pidfd_raw = to_ioresult(ret).map_err(|e| {
                 log::error!("pidfd_open failed: {}", e);
                 AppRuntimeError::Io(e)
             })?;
+
+            // wrap in OwnedFd so it's closed on drop, unlike a bare RawFd
+            let pidfd = unsafe { OwnedFd::from_raw_fd(pidfd_raw) };
 
             let stdout = pipe_stdout
                 .into_nonblocking_read_fd()
@@ -632,7 +630,7 @@ impl AppRuntime {
                 .into_nonblocking_read_fd()
                 .expect("nonblocking stderr");
 
-            let mut pidfd_sourcefd = SourceFd(&pidfd);
+            let mut pidfd_sourcefd = SourceFd(&pidfd.as_raw_fd());
             let pidfd_token = token_slab
                 .allocate()
                 .ok_or(AppRuntimeError::TokenAllocation)?;
@@ -673,8 +671,6 @@ impl AppRuntime {
                 started_at: Instant::now(),
                 proper_cleanup: false,
             })
-        } else {
-            Err(AppRuntimeError::ForkFailed(ret))
         }
     }
 
@@ -683,7 +679,7 @@ impl AppRuntime {
         poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
     ) -> Result<(), AppRuntimeError> {
-        let mut pidfd_sourcefd = SourceFd(&self.pidfd);
+        let mut pidfd_sourcefd = SourceFd(&self.pidfd.as_raw_fd());
         poll.registry().deregister(&mut pidfd_sourcefd)?;
         token_slab.free(self.tokens.pidfd);
 
@@ -707,15 +703,17 @@ impl AppRuntime {
     }
 
     pub fn send_sigterm(&self) -> io::Result<()> {
+        // setsid() made this app its own process group leader (pgid == pid), so
+        // signal the whole group to also reach children it forked (e.g. shell scripts).
         let ret = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGTERM) };
-        log::info!("app {} kill -> {}", self.pid, ret);
+        log::info!("app {} kill SIGTERM -> {}", self.pid, ret);
         to_ioresult(ret)?;
         Ok(())
     }
 
     pub fn send_sigkill(&self) -> io::Result<()> {
         let ret = unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
-        log::info!("app {} kill -> {}", self.pid, ret);
+        log::info!("app {} SIGKILL -> {}", self.pid, ret);
         if let Err(err) = to_ioresult(ret) {
             log::error!("Failed to send SIGKILL to app {}: {}", self.pid, err);
         }

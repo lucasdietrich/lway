@@ -2,7 +2,7 @@ use cgroups_rs::fs::blkio::BlkIoController;
 use cgroups_rs::fs::cgroup_builder::*;
 use cgroups_rs::fs::cpu::CpuController;
 use cgroups_rs::fs::memory::MemController;
-use cgroups_rs::{fs::*, CgroupPid};
+use cgroups_rs::fs::*;
 use serde::Deserialize;
 
 const LWAY_CGROUP_NAME: &str = "lway";
@@ -71,10 +71,61 @@ pub fn init_app_cgroup(name: &str, config: &AppCgroupConfig) -> Cgroup {
         .build(hier)
         .expect("Failed to build app cgroup");
 
-    app.add_task_by_tgid(CgroupPid::from(pid as u64))
-        .expect("Failed to add task to app cgroup");
+    // app.add_task_by_tgid(CgroupPid::from(pid as u64))
+    //     .expect("Failed to add task to app cgroup");
 
     app
+}
+
+use std::ffi::c_int;
+use std::fs::File;
+use std::os::unix::io::AsRawFd;
+
+use crate::support::to_ioresult;
+
+const CLONE_INTO_CGROUP: u64 = 0x200000000;
+
+#[repr(C)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
+pub fn spawn_into_cgroup(cgroup_path: &str) -> std::io::Result<libc::pid_t> {
+    let cg_file = File::open(cgroup_path)?;
+    let mut args = CloneArgs {
+        flags: CLONE_INTO_CGROUP,
+        pidfd: 0,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: libc::SIGCHLD as u64,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: cg_file.as_raw_fd() as u64,
+    };
+
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            &mut args as *mut CloneArgs,
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    let pid = to_ioresult(ret as c_int)?;
+
+    Ok(pid as libc::pid_t)
 }
 
 /// Point-in-time resource usage read from a cgroup's controllers.
