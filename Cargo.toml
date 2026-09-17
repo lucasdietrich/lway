@@ -14,7 +14,7 @@ mio = { version = "0.8", features = ["os-poll", "net", "os-ext"] }
 
 # cgroups-rs = "0.5.1"
 # pending PR https://github.com/kata-containers/cgroups-rs/pull/178
-cgroups-rs = { git = "https://github.com/lucasdietrich/cgroups-rs.git", rev = "30b048edc819c70e9952cfb7efd09edaa85077a4"}
+cgroups-rs = { git = "https://github.com/lucasdietrich/cgroups-rs.git", rev = "122b651e5eeea8952fe33534b357689914e48400"}
 
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
