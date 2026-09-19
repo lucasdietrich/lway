@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -40,7 +41,11 @@ int main() {
 
     info();
 
+    uint64_t i = 0;
+
     for (;;) {
+        printf("ch log line: %lu\n", i);
         sleep(1);
+        i++;
     }
 }

@@ -61,3 +61,8 @@ ch:
   . ./.env && bear -- $CC apps/ch.c -o apps/ch
   ssh {{target}} "mkdir -p /var/amy"
   scp apps/ch {{target}}:/var/amy/
+
+apps APP='app':
+  . ./.env && bear -- $CC apps/{{APP}}.c -o apps/{{APP}}
+  ssh {{target}} "mkdir -p /var/amy"
+  scp apps/{{APP}} {{target}}:/var/amy/

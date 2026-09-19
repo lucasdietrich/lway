@@ -1,8 +1,8 @@
 use std::{
     ffi::{c_int, CString},
     fmt::Display,
-    io::{self, Read},
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    io,
+    os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -10,8 +10,8 @@ use std::{
 
 use cgroups_rs::fs::Cgroup;
 use libc::{
-    c_char, dup2, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED,
-    WIFSIGNALED, WNOHANG, WTERMSIG,
+    c_char, pid_t, waitpid, STDERR_FILENO, STDOUT_FILENO, WEXITSTATUS, WIFEXITED, WIFSIGNALED,
+    WNOHANG, WTERMSIG,
 };
 use mio::unix::SourceFd;
 use thiserror::Error;
@@ -21,10 +21,11 @@ use crate::{
         init_app_cgroup, read_cgroup_usage, spawn_into_cgroup, wait_for_cgroup_empty,
         AppCgroupConfig, CgroupUsage,
     },
-    logger::Logger,
+    logger::{LogBuffer, ViewableLogBuffer},
     restart::RestartPolicy,
     stats::AppStats,
     support::{
+        log_buffer::{CircularMappedMemFdBuffer, MemFdBuffer, DEFAULT_LOG_BUFFER_SIZE},
         mio_token_slab::MioTokenSlab,
         pipe::{Pipe, PipeReader},
         signal::signal_name,
@@ -33,7 +34,7 @@ use crate::{
     },
 };
 
-const STDIO_BUFFER_SIZE: usize = 4096;
+const SPLICE_MAX_XFER_SIZE: usize = 16384;
 
 #[derive(Debug, Error)]
 pub enum AppErr {
@@ -89,6 +90,7 @@ pub struct App {
     runtime_stats: AppRuntimeStats,
     /// Set by `stop()` to suppress auto-restart of an app the user explicitly stopped.
     stop_requested: bool,
+    log_buffer: Box<dyn ViewableLogBuffer>,
 }
 
 impl App {
@@ -99,11 +101,17 @@ impl App {
     ) -> Result<Self, AppErr> {
         let state = match params.autostart {
             true => {
-                let runtime = AppRuntime::start(&params, &poll, token_slab)?;
+                let runtime = AppRuntime::start(&params, poll, token_slab)?;
                 State::Running(runtime)
             }
             false => State::default(),
         };
+
+        let memfd_buffer =
+            MemFdBuffer::new_sealed(&format!("logbuf-{}", params.name), DEFAULT_LOG_BUFFER_SIZE)
+                .expect("Failed to create memfd buffer");
+        let circ_buffer = CircularMappedMemFdBuffer::new_from_memfd_buffer(memfd_buffer)
+            .expect("Failed to create circular log buffer");
 
         Ok(App {
             name: params.name.to_string(),
@@ -111,13 +119,14 @@ impl App {
             params,
             runtime_stats: AppRuntimeStats::default(),
             stop_requested: false,
+            log_buffer: Box::new(circ_buffer),
         })
     }
 
     pub fn start(&mut self, poll: &mio::Poll, token_slab: &mut MioTokenSlab) -> Result<(), AppErr> {
         match self.state {
             State::Stopped { .. } => {
-                let runtime = AppRuntime::start(&self.params, &poll, token_slab)?;
+                let runtime = AppRuntime::start(&self.params, poll, token_slab)?;
                 self.state = State::Running(runtime);
                 self.runtime_stats.consecutive_failures = 0;
                 self.stop_requested = false;
@@ -354,58 +363,88 @@ impl App {
         token_slab: &mut MioTokenSlab,
         token: mio::Token,
         event: &mio::event::Event,
-        logger: &dyn Logger,
         try_restart: bool,
     ) {
         let State::Running(rt) = &mut self.state else {
             return;
         };
 
-        // logging: Read stdout and stderr
-        // TODO replace this buffer to mmap per AppRuntime to avoid reallocating each loop
-        let mut buf = vec![0u8; STDIO_BUFFER_SIZE];
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Stdio {
+            Stdout,
+            Stderr,
+        }
 
-        if token == rt.tokens.stdout {
-            if event.is_readable() {
-                if let Ok(rcvd) = rt.stdout.read(&mut buf) {
-                    log::debug!("app {} rcvd {} bytes from stdout", rt.pid, rcvd);
-                    self.runtime_stats.stdout_bytes += rcvd as u64;
-                    logger
-                        .log(&self.name, rt.pid, &buf[..rcvd])
-                        .expect("log stdout");
-                } else {
-                    log::debug!(
-                        "app {} no data from stdout: {}",
-                        rt.pid,
-                        std::io::Error::last_os_error()
-                    );
+        impl Display for Stdio {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    Stdio::Stdout => write!(f, "stdout"),
+                    Stdio::Stderr => write!(f, "stderr"),
                 }
-            }
-
-            if event.is_read_closed() {
-                log::info!("app {} stdout closed", rt.pid);
             }
         }
 
-        if token == rt.tokens.stderr {
+        fn get_stdio_fd(token: mio::Token, rt: &AppRuntime) -> Option<(Stdio, RawFd)> {
+            if token == rt.tokens.stdout {
+                Some((Stdio::Stdout, rt.stdout.as_raw_fd()))
+            } else if token == rt.tokens.stderr {
+                Some((Stdio::Stderr, rt.stderr.as_raw_fd()))
+            } else {
+                None
+            }
+        }
+
+        if let Some((stdio, stdio_fd)) = get_stdio_fd(token, rt) {
             if event.is_readable() {
-                if let Ok(rcvd) = rt.stderr.read(&mut buf) {
-                    log::debug!("app {} rcvd {} bytes from stderr", rt.pid, rcvd);
-                    self.runtime_stats.stderr_bytes += rcvd as u64;
-                    logger
-                        .log(&self.name, rt.pid, &buf[..rcvd])
-                        .expect("log stderr");
-                } else {
-                    log::debug!(
-                        "app {} no data from stderr: {}",
-                        rt.pid,
-                        std::io::Error::last_os_error()
-                    );
+                // mio uses edge-triggered epoll: keep splicing until the pipe is
+                // drained (WouldBlock/EOF), otherwise leftover bytes (e.g. from the
+                // ring buffer's per-call wraparound clamp) won't re-arm the event
+                loop {
+                    match self.log_buffer.splice_from2(stdio_fd, SPLICE_MAX_XFER_SIZE) {
+                        Ok(None) => break,
+                        Ok(Some(buf)) => {
+                            log::debug!(
+                                "app {} spliced {} bytes from {} to log buffer",
+                                rt.pid,
+                                buf.len(),
+                                stdio,
+                            );
+                            if log::log_enabled!(log::Level::Trace) {
+                                hexdump::hexdump(buf);
+                            }
+                            match stdio {
+                                Stdio::Stdout => {
+                                    self.runtime_stats.stdout_bytes += buf.len() as u64
+                                }
+                                Stdio::Stderr => {
+                                    self.runtime_stats.stderr_bytes += buf.len() as u64
+                                }
+                            }
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+                        // TODO on splice error, read into a buffer but dismiss the content
+                        Err(err) => {
+                            log::error!(
+                                "app {} failed to splice {} to log buffer: {}",
+                                rt.pid,
+                                stdio,
+                                err,
+                            );
+                            break;
+                        }
+                    }
                 }
+
+                log::debug!(
+                    "app {} log buffer filling: {} / {}",
+                    rt.pid,
+                    self.log_buffer.filling(),
+                    self.log_buffer.capacity().unwrap_or(0)
+                );
             }
 
             if event.is_read_closed() {
-                log::info!("app {} stderr closed", rt.pid);
+                log::info!("app {} {} closed", rt.pid, stdio);
             }
         }
 
@@ -440,16 +479,14 @@ impl App {
                     &mut rt.stdout,
                     rt.pid,
                     "stdout",
-                    &self.name,
-                    logger,
+                    self.log_buffer.as_mut(),
                     &mut self.runtime_stats.stdout_bytes,
                 );
                 Self::drain_pipe(
                     &mut rt.stderr,
                     rt.pid,
                     "stderr",
-                    &self.name,
-                    logger,
+                    self.log_buffer.as_mut(),
                     &mut self.runtime_stats.stderr_bytes,
                 );
 
@@ -473,18 +510,15 @@ impl App {
         pipe: &mut PipeReader,
         pid: pid_t,
         stream: &str,
-        name: &str,
-        logger: &dyn Logger,
+        log_buffer: &mut dyn LogBuffer,
         byte_count: &mut u64,
     ) {
-        let mut buf = [0u8; STDIO_BUFFER_SIZE];
         loop {
-            match pipe.read(&mut buf) {
+            match log_buffer.splice_from(pipe.as_raw_fd(), SPLICE_MAX_XFER_SIZE) {
                 Ok(0) => break,
                 Ok(rcvd) => {
-                    log::debug!("app {} drained {} bytes from {}", pid, rcvd, stream);
+                    log::debug!("app {} spliced {} bytes from {}", pid, rcvd, stream);
                     *byte_count += rcvd as u64;
-                    logger.log(name, pid, &buf[..rcvd]).expect("log drain");
                 }
                 Err(_) => break,
             }
@@ -855,14 +889,17 @@ impl State {
 }
 
 fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
-    let ret = unsafe { dup2(src.as_raw_fd(), dst.as_raw_fd()) };
+    let ret = unsafe { libc::dup2(src.as_raw_fd(), dst.as_raw_fd()) };
     to_ioresult(ret)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod restart_tests {
-    use crate::restart::RestartDelay;
+    use crate::{
+        restart::RestartDelay,
+        support::log_buffer::{MemFdBuffer, MemMapBuffer},
+    };
 
     use super::*;
 
@@ -895,6 +932,13 @@ mod restart_tests {
             state: State::default(),
             runtime_stats: AppRuntimeStats::default(),
             stop_requested: false,
+            log_buffer: Box::new(
+                MemMapBuffer::new_from_memfd(
+                    MemFdBuffer::new_sealed("log", DEFAULT_LOG_BUFFER_SIZE)
+                        .expect("Failed to create log buffer"),
+                )
+                .expect("Failed to create mmap log buffer"),
+            ),
         }
     }
 

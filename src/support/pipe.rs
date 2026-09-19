@@ -12,8 +12,11 @@ use crate::support::to_ioresult;
 #[derive(Debug)]
 pub struct PipeReader(OwnedFd);
 
-#[derive(Debug)]
-pub struct PipeWriter(OwnedFd);
+impl PipeReader {
+    pub fn splice_to(&self, write_fd: &impl AsRawFd, size: usize) -> io::Result<usize> {
+        splice(self.as_raw_fd(), write_fd.as_raw_fd(), None, size)
+    }
+}
 
 impl AsRawFd for PipeReader {
     fn as_raw_fd(&self) -> RawFd {
@@ -35,6 +38,15 @@ impl Read for PipeReader {
         } else {
             Err(std::io::Error::last_os_error())
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct PipeWriter(OwnedFd);
+
+impl PipeWriter {
+    pub fn splice_from(&self, read_fd: &impl AsRawFd, size: usize) -> io::Result<usize> {
+        splice(read_fd.as_raw_fd(), self.as_raw_fd(), None, size)
     }
 }
 
@@ -94,4 +106,32 @@ impl Display for Pipe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Pipe {{ read: {}, write: {} }}", self.0[0], self.0[1])
     }
+}
+
+/// Splices data from `read_fd` into `out_fd` at the given optional output offset.
+/// If `out_offset` is `None`, the current file position of `out_fd` is used.
+/// One of the file descriptors must be a pipe.
+pub(crate) fn splice(
+    read_fd: RawFd,
+    out_fd: RawFd,
+    out_offset: Option<libc::loff_t>,
+    len: usize,
+) -> io::Result<usize> {
+    let off_out: *mut libc::loff_t = match out_offset {
+        Some(offset) => &mut (offset as libc::loff_t) as *mut libc::loff_t,
+        None => std::ptr::null_mut(),
+    };
+
+    let ret = unsafe {
+        libc::splice(
+            read_fd,
+            std::ptr::null_mut(),
+            out_fd,
+            off_out,
+            len,
+            libc::SPLICE_F_MOVE | libc::SPLICE_F_NONBLOCK | libc::SPLICE_F_MORE,
+        )
+    };
+    let result = to_ioresult(ret as c_int)? as usize;
+    Ok(result)
 }

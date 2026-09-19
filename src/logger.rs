@@ -1,6 +1,12 @@
-use std::error::Error;
+use std::{
+    error::Error,
+    io::{self},
+    os::fd::{AsRawFd, RawFd},
+};
 
-pub trait Logger {
+use crate::support::pipe::splice;
+
+pub trait LoggerSimple {
     fn log_str(&self, name: &str, pid: libc::pid_t, msg: &str) -> Result<(), Box<dyn Error>> {
         self.log(name, pid, msg.as_bytes())
     }
@@ -28,7 +34,7 @@ impl Default for StdoutLogger {
     }
 }
 
-impl Logger for StdoutLogger {
+impl LoggerSimple for StdoutLogger {
     fn log(&self, name: &str, pid: libc::pid_t, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
         let string = String::from_utf8_lossy(bytes);
         for line in string.lines() {
@@ -39,10 +45,27 @@ impl Logger for StdoutLogger {
     }
 }
 
-pub struct NoopLogger;
+pub trait LogBuffer: AsRawFd {
+    fn as_file(&mut self) -> &mut std::fs::File;
 
-impl Logger for NoopLogger {
-    fn log(&self, _name: &str, _pid: libc::pid_t, _bytes: &[u8]) -> Result<(), Box<dyn Error>> {
-        Ok(())
+    /// Splices up to `max_len` bytes from `read_fd` (a pipe) into the buffer, returning
+    /// the number of bytes written. A buffer may write fewer bytes than requested for
+    /// reasons other than the source being empty (e.g. a ring buffer stopping at its
+    /// wrap boundary); callers that need to fully drain a pipe should loop on this until
+    /// it returns `Ok(0)`.
+    fn splice_from(&mut self, read_fd: RawFd, len: usize) -> io::Result<usize> {
+        splice(read_fd, self.as_raw_fd(), None, len)
     }
+
+    fn as_mmap(&mut self) -> Option<&mut memmap2::MmapMut> {
+        None
+    }
+
+    fn filling(&mut self) -> usize;
+
+    fn capacity(&mut self) -> Option<usize>;
+}
+
+pub trait ViewableLogBuffer: LogBuffer {
+    fn splice_from2(&mut self, read_fd: RawFd, len: usize) -> io::Result<Option<&[u8]>>;
 }

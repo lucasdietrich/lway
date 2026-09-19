@@ -1,9 +1,9 @@
 use std::{
     ffi::{CStr, CString},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
-fn get_cwd_path<'a>(buf: &'a mut impl AsMut<[u8]>) -> std::io::Result<&'a CStr> {
+fn get_cwd_path(buf: &mut impl AsMut<[u8]>) -> std::io::Result<&CStr> {
     let buf = buf.as_mut();
     let ret = unsafe { libc::getcwd(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
     if ret.is_null() {
@@ -22,7 +22,7 @@ pub fn get_current_cwd() -> std::io::Result<PathBuf> {
     Ok(PathBuf::from(cwd.to_string_lossy().into_owned()))
 }
 
-pub fn set_current_cwd(path: &PathBuf) -> std::io::Result<()> {
+pub fn set_current_cwd(path: &Path) -> std::io::Result<()> {
     let path_string = path.display().to_string();
     let path_cstr = CString::new(path_string).expect("cwd");
     let ret = unsafe { libc::chdir(path_cstr.as_ptr()) };

@@ -11,7 +11,7 @@ use crate::support::to_ioresult;
 /// SIGABRT), only the primary name is kept.
 ///
 /// <https://man7.org/linux/man-pages/man7/signal.7.html>
-pub static SIGNAL_NAMES: [&'static str; 32] = [
+pub static SIGNAL_NAMES: [&str; 32] = [
     "",          // 0 (unused)
     "SIGHUP",    // 1
     "SIGINT",    // 2

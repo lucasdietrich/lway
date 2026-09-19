@@ -156,12 +156,12 @@ fn main() {
         .config
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
     let global_cfg = GlobalConfig::load(&config_path).unwrap_or_else(|e| {
-        log::warn!(
+        log::error!(
             "Failed to load global config {}: {}",
             config_path.display(),
             e
         );
-        GlobalConfig::default()
+        std::process::exit(1);
     });
 
     let apps = global_cfg.all_apps(&config_path);
@@ -177,7 +177,7 @@ fn main() {
     let mut signal_sourcefd = SourceFd(&signalfd);
 
     let mut rt = Runtime::init();
-    let logger = logger::StdoutLogger::default();
+    // let logger = logger::StdoutLogger::default();
 
     let main_cg = init_main_cgroup();
 
@@ -187,7 +187,7 @@ fn main() {
         let cwd = app_cfg
             .workdir
             .clone()
-            .map(|p| PathBuf::from(p))
+            .map(PathBuf::from)
             .unwrap_or_else(|| get_current_cwd().expect("get current cwd"));
         let uid = app_cfg.resolved_uid().unwrap_or_else(get_current_uid);
         let gid = app_cfg.resolved_gid().unwrap_or_else(get_current_gid);
@@ -273,13 +273,10 @@ fn main() {
             log::debug!("poll ready for token: {:?} event: {:?}", token, event);
 
             if token == SIGNALFD_TOKEN {
-                match handle_signal_fd(&signalfd) {
+                if handle_signal_fd(&signalfd) == libc::SIGINT {
                     // Increment the SIGINT count and mark the runtime as stopping
-                    libc::SIGINT => {
-                        rt.sigint_count += 1;
-                        rt.stopping = true;
-                    }
-                    _ => {}
+                    rt.sigint_count += 1;
+                    rt.stopping = true;
                 }
                 continue;
             }
@@ -319,14 +316,7 @@ fn main() {
             for app in rt.apps.iter_mut() {
                 // TODO optimize this, as finding the app matching the token could be long if there is a lot of apps
                 // also immediately exit the loop if the matching app is found
-                app.poll(
-                    &poll,
-                    &mut rt.mio_token_slab,
-                    token,
-                    event,
-                    &logger,
-                    !rt.stopping,
-                )
+                app.poll(&poll, &mut rt.mio_token_slab, token, event, !rt.stopping)
             }
         }
 

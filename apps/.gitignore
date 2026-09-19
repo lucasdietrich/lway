@@ -2,3 +2,6 @@ app
 test
 writer
 ch
+mmap
+circmmap
+logspam
