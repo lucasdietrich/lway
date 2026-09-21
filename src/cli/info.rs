@@ -102,6 +102,28 @@ pub fn print_info(name: &str, full: &AppFullInfo) {
         "  memory_swap_limit   {}",
         format_opt(debug.cgroup_config.memory_swap_limit)
     );
+
+    println!("Log buffer:");
+    println!("  kind                {}", debug.log_buffer.kind);
+    println!(
+        "  capacity            {}",
+        debug
+            .log_buffer
+            .capacity
+            .map_or_else(|| "-".to_string(), format_bytes)
+    );
+    println!(
+        "  write_pos           {}",
+        format_bytes(debug.log_buffer.write_pos)
+    );
+    println!(
+        "  start_pos           {}",
+        format_bytes(debug.log_buffer.start_pos)
+    );
+    println!(
+        "  retained            {}",
+        format_bytes(debug.log_buffer.write_pos - debug.log_buffer.start_pos)
+    );
 }
 
 fn format_duration(d: Option<Duration>) -> String {

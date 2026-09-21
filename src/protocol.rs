@@ -69,6 +69,19 @@ pub struct AppDebugInfo {
     pub cgroup_config: AppCgroupConfig,
     /// Full cgroupfs path of the app's cgroup, if it's currently running.
     pub cgroup_path: Option<String>,
+    pub log_buffer: LogBufferDebugInfo,
+}
+
+/// Implementation-level details about an app's captured stdout/stderr buffer.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LogBufferDebugInfo {
+    /// Concrete buffer implementation, e.g. `"circular-mmap"`.
+    pub kind: String,
+    pub capacity: Option<u64>,
+    /// Total bytes ever written; monotonically increasing (wraps for ring buffers).
+    pub write_pos: u64,
+    /// Oldest logical offset still retained; bytes before this were overwritten/evicted.
+    pub start_pos: u64,
 }
 
 /// Full effective configuration of a running app, enough to rebuild its YAML entry.

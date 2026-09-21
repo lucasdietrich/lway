@@ -331,6 +331,22 @@ impl App {
         self.log_buffer.write_pos()
     }
 
+    /// Oldest logical offset still retained in the log buffer; bytes before this
+    /// were overwritten/evicted.
+    pub fn log_start_pos(&mut self) -> usize {
+        self.log_buffer.start_pos()
+    }
+
+    /// Capacity of the log buffer in bytes, if it's fixed-size (e.g. a ring buffer).
+    pub fn log_buffer_capacity(&mut self) -> Option<usize> {
+        self.log_buffer.capacity()
+    }
+
+    /// Short, human-readable name of the log buffer's concrete implementation.
+    pub fn log_buffer_kind(&self) -> &'static str {
+        self.log_buffer.kind()
+    }
+
     /// Largest contiguous slice of the log buffer retained from `from` onward (no
     /// UTF-8 decoding, no copy). See `ViewableLogBuffer::read_from_cursor`.
     pub fn log_bytes_from_cursor(&mut self, from: usize) -> LogChunk<'_> {
@@ -411,7 +427,10 @@ impl App {
                 // drained (WouldBlock/EOF), otherwise leftover bytes (e.g. from the
                 // ring buffer's per-call wraparound clamp) won't re-arm the event
                 loop {
-                    match self.log_buffer.splice_from_and_view(stdio_fd, SPLICE_MAX_XFER_SIZE) {
+                    match self
+                        .log_buffer
+                        .splice_from_and_view(stdio_fd, SPLICE_MAX_XFER_SIZE)
+                    {
                         Ok(None) => break,
                         Ok(Some(buf)) => {
                             if log::log_enabled!(log::Level::Trace) {

@@ -61,6 +61,10 @@ pub trait LogBuffer: AsRawFd {
 
     // Todo change signature to `fn capacity(&mut self) -> usize;`
     fn capacity(&mut self) -> Option<usize>;
+
+    /// Short, human-readable name of the concrete buffer implementation (e.g.
+    /// `"circular-mmap"`), for debug/introspection purposes only.
+    fn kind(&self) -> &'static str;
 }
 
 pub struct LogChunk<'a> {
@@ -79,7 +83,11 @@ impl<'a> LogChunk<'a> {
 }
 
 pub trait ViewableLogBuffer: LogBuffer {
-    fn splice_from_and_view<'a>(&'a mut self, read_fd: RawFd, len: usize) -> io::Result<Option<&'a [u8]>>;
+    fn splice_from_and_view<'a>(
+        &'a mut self,
+        read_fd: RawFd,
+        len: usize,
+    ) -> io::Result<Option<&'a [u8]>>;
 
     /// Total bytes ever written to the buffer; monotonically increasing.
     fn write_pos(&mut self) -> usize {

@@ -94,6 +94,10 @@ impl LogBuffer for MemFdBuffer<Sealed> {
     fn capacity(&mut self) -> Option<usize> {
         Some(self.sealed.capacity)
     }
+
+    fn kind(&self) -> &'static str {
+        "memfd-sealed"
+    }
 }
 
 impl LogBuffer for MemFdBuffer<Unsealed> {
@@ -109,6 +113,10 @@ impl LogBuffer for MemFdBuffer<Unsealed> {
 
     fn capacity(&mut self) -> Option<usize> {
         None
+    }
+
+    fn kind(&self) -> &'static str {
+        "memfd"
     }
 }
 
@@ -207,6 +215,10 @@ impl LogBuffer for CircularMappedMemFdBuffer {
     fn capacity(&mut self) -> Option<usize> {
         Some(self.capacity)
     }
+
+    fn kind(&self) -> &'static str {
+        "circular-mmap"
+    }
 }
 
 impl ViewableLogBuffer for CircularMappedMemFdBuffer {
@@ -302,10 +314,18 @@ impl LogBuffer for MemMapBuffer {
     fn capacity(&mut self) -> Option<usize> {
         Some(self.mmap.len())
     }
+
+    fn kind(&self) -> &'static str {
+        "mmap"
+    }
 }
 
 impl ViewableLogBuffer for MemMapBuffer {
-    fn splice_from_and_view(&mut self, read_fd: RawFd, len: usize) -> std::io::Result<Option<&[u8]>> {
+    fn splice_from_and_view(
+        &mut self,
+        read_fd: RawFd,
+        len: usize,
+    ) -> std::io::Result<Option<&[u8]>> {
         let chunk = len.min(self.mmap.len());
         let n = splice(read_fd, self.file.as_raw_fd(), Some(0), chunk)?;
         match n {
@@ -367,5 +387,9 @@ impl LogBuffer for DevNullLogBuffer {
 
     fn capacity(&mut self) -> Option<usize> {
         None
+    }
+
+    fn kind(&self) -> &'static str {
+        "dev-null"
     }
 }
