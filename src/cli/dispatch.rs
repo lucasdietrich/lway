@@ -4,10 +4,12 @@
 use std::path::Path;
 
 use crate::cli;
+use crate::ipc::IpcError;
 use crate::Command;
 
-/// Runs the client-side handler for `command` against the daemon at `socket_path`.
-pub(crate) fn run_client_command(command: Command, socket_path: &Path) {
+/// Runs the client-side handler for `command` against the daemon's control socket at
+/// `socket_path`, except `Log` which talks to the dedicated `log_socket_path` instead.
+pub(crate) fn run_client_command(command: Command, socket_path: &Path, log_socket_path: &Path) {
     match command {
         Command::List => run_list_client(socket_path),
         Command::Info { name } => run_info_client(socket_path, &name),
@@ -16,6 +18,9 @@ pub(crate) fn run_client_command(command: Command, socket_path: &Path) {
         Command::StartAll => run_start_all_client(socket_path),
         Command::Stop { name, force } => run_stop_client(socket_path, &name, force),
         Command::StopAll { force } => run_stop_all_client(socket_path, force),
+        Command::Log { name, follow } => {
+            run_log_client(socket_path, log_socket_path, &name, follow)
+        }
     }
 }
 
@@ -109,5 +114,32 @@ fn run_stop_all_client(socket_path: &Path, force: bool) {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
+    }
+}
+
+/// Connects to a running daemon, verifies `name` is a known app via the control
+/// socket, then prints (optionally follows) its logs from the dedicated log socket,
+/// which carries nothing but that app's raw log bytes.
+fn run_log_client(socket_path: &Path, log_socket_path: &Path, name: &str, follow: bool) {
+    match cli::list::list_apps(socket_path) {
+        Ok(apps) => {
+            if !apps.iter().any(|app| app.name == name) {
+                let err = IpcError::AppNotFound {
+                    name: name.to_string(),
+                    apps: apps.into_iter().map(|app| app.name).collect(),
+                };
+                eprintln!("error: {}", err);
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    if let Err(e) = cli::logs::run(log_socket_path, name, follow) {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
     }
 }

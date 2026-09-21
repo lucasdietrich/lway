@@ -18,6 +18,7 @@ pub mod cgroups;
 pub mod cli;
 pub mod config;
 pub mod ipc;
+pub mod log_ipc;
 pub mod logger;
 pub mod parser;
 pub mod protocol;
@@ -30,13 +31,17 @@ const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 // world-writable /tmp is fine for local experimentation; a real deployment
 // running as root should keep this under /run.
 const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
+// Kept separate from the control socket so raw log bytes never have to share a
+// connection (or its JSON framing) with control requests/responses.
+const DEFAULT_LOG_SOCKET_PATH: &str = "/run/lway-logs.sock";
 
 // Number of SIGINT signals to receive before killing (9) the process
 const SIGINT_THRESHOLD: usize = 2;
 
 pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 pub const SIGNALFD_TOKEN: Token = Token(1);
-pub const RESERVED_MIO_TOKENS: usize = 2;
+pub const LOG_LISTENER_TOKEN: Token = Token(2);
+pub const RESERVED_MIO_TOKENS: usize = 3;
 pub const MAX_MIO_TOKENS: usize = 128;
 
 /// lway - a tiny process supervisor
@@ -54,6 +59,10 @@ struct Cli {
     /// Path to the daemon's control socket
     #[arg(long = "socket")]
     socket: Option<PathBuf>,
+
+    /// Path to the daemon's log-streaming socket
+    #[arg(long = "log-socket")]
+    log_socket: Option<PathBuf>,
 
     /// Run as the background supervisor instead of a CLI client
     #[arg(long = "daemon")]
@@ -102,6 +111,14 @@ pub(crate) enum Command {
         #[arg(short = 'f', long = "force")]
         force: bool,
     },
+    /// Show an app's captured stdout/stderr
+    Log {
+        /// Name of the app to show logs for
+        name: String,
+        /// Keep streaming new log output as it's produced
+        #[arg(short = 'f', long = "follow")]
+        follow: bool,
+    },
 }
 
 pub struct Runtime {
@@ -129,6 +146,10 @@ fn main() {
         .socket
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
+    let log_socket_path = cli
+        .log_socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LOG_SOCKET_PATH));
 
     if !cli.daemon {
         let command = cli.command.unwrap_or_else(|| {
@@ -136,7 +157,7 @@ fn main() {
             println!();
             std::process::exit(1);
         });
-        cli::dispatch::run_client_command(command, &socket_path);
+        cli::dispatch::run_client_command(command, &socket_path, &log_socket_path);
         return;
     }
 
@@ -243,6 +264,21 @@ fn main() {
             std::process::exit(1);
         });
 
+    let mut log_server = log_ipc::LogServer::bind(
+        &log_socket_path,
+        &poll,
+        LOG_LISTENER_TOKEN,
+        log_ipc::DEFAULT_MAX_CONNECTIONS,
+    )
+    .unwrap_or_else(|e| {
+        log::error!(
+            "Failed to bind log socket {}: {}",
+            log_socket_path.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+
     poll.registry()
         .register(
             &mut signal_sourcefd,
@@ -270,7 +306,8 @@ fn main() {
 
         for event in events.iter() {
             let token = event.token();
-            log::debug!("poll ready for token: {:?} event: {:?}", token, event);
+
+            log::debug!("poll {}{}", token.0, MioEventDisplay(&event));
 
             if token == SIGNALFD_TOKEN {
                 if handle_signal_fd(&signalfd) == libc::SIGINT {
@@ -284,6 +321,13 @@ fn main() {
             if token == UNIX_LISTENER_TOKEN {
                 if let Err(e) = ipc_server.accept_all(&poll, &mut rt.mio_token_slab) {
                     log::error!("failed to accept control connection: {}", e);
+                }
+                continue;
+            }
+
+            if token == LOG_LISTENER_TOKEN {
+                if let Err(e) = log_server.accept_all(&poll, &mut rt.mio_token_slab) {
+                    log::error!("failed to accept log connection: {}", e);
                 }
                 continue;
             }
@@ -312,6 +356,25 @@ fn main() {
                 continue;
             }
 
+            if log_server.is_known(token) {
+                if event.is_readable() {
+                    if let Err(e) = log_server.handle_readable(token, &mut rt.apps) {
+                        log::error!("log connection read error: {}", e);
+                        log_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                if event.is_writable() {
+                    if let Err(e) = log_server.handle_writable(token, &mut rt.apps) {
+                        log::error!("log connection write error: {}", e);
+                        log_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                log_server.reconcile(token, &poll, &mut rt.mio_token_slab);
+                continue;
+            }
+
             // Create the equivalent is_known() for applications
             for app in rt.apps.iter_mut() {
                 // TODO optimize this, as finding the app matching the token could be long if there is a lot of apps
@@ -319,6 +382,9 @@ fn main() {
                 app.poll(&poll, &mut rt.mio_token_slab, token, event, !rt.stopping)
             }
         }
+
+        // forward any freshly captured log output to active `log -f` connections
+        log_server.push_updates(&mut rt.apps, &poll, &mut rt.mio_token_slab);
 
         // fire any scheduled restarts whose delay has elapsed
         let now = Instant::now();
@@ -355,5 +421,29 @@ fn main() {
     }
 
     let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&log_socket_path);
     main_cg.delete().expect("Failed to delete main cgroup");
+}
+
+struct MioEventDisplay<'a>(&'a mio::event::Event);
+
+impl std::fmt::Display for MioEventDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_error() {
+            write!(f, " ERROR")?;
+        }
+        if self.0.is_readable() {
+            write!(f, " READABLE")?;
+        }
+        if self.0.is_writable() {
+            write!(f, " WRITABLE")?;
+        }
+        if self.0.is_read_closed() {
+            write!(f, " READ_CLOSED")?;
+        }
+        if self.0.is_write_closed() {
+            write!(f, " WRITE_CLOSED")?;
+        }
+        Ok(())
+    }
 }

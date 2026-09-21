@@ -21,7 +21,7 @@ use crate::{
         init_app_cgroup, read_cgroup_usage, spawn_into_cgroup, wait_for_cgroup_empty,
         AppCgroupConfig, CgroupUsage,
     },
-    logger::{LogBuffer, ViewableLogBuffer},
+    logger::{LogBuffer, LogChunk, ViewableLogBuffer},
     restart::RestartPolicy,
     stats::AppStats,
     support::{
@@ -326,6 +326,17 @@ impl App {
         &self.params.restart
     }
 
+    /// Total bytes ever written to this app's log buffer; used as a follow cursor.
+    pub fn log_write_pos(&mut self) -> usize {
+        self.log_buffer.write_pos()
+    }
+
+    /// Largest contiguous slice of the log buffer retained from `from` onward (no
+    /// UTF-8 decoding, no copy). See `ViewableLogBuffer::read_from_cursor`.
+    pub fn log_bytes_from_cursor(&mut self, from: usize) -> LogChunk<'_> {
+        self.log_buffer.read_from_cursor(from)
+    }
+
     /// Full cgroupfs path of the app's cgroup, if it's currently running.
     pub fn cgroup_path(&self) -> Option<String> {
         match &self.state {
@@ -400,18 +411,13 @@ impl App {
                 // drained (WouldBlock/EOF), otherwise leftover bytes (e.g. from the
                 // ring buffer's per-call wraparound clamp) won't re-arm the event
                 loop {
-                    match self.log_buffer.splice_from2(stdio_fd, SPLICE_MAX_XFER_SIZE) {
+                    match self.log_buffer.splice_from_and_view(stdio_fd, SPLICE_MAX_XFER_SIZE) {
                         Ok(None) => break,
                         Ok(Some(buf)) => {
-                            log::debug!(
-                                "app {} spliced {} bytes from {} to log buffer",
-                                rt.pid,
-                                buf.len(),
-                                stdio,
-                            );
                             if log::log_enabled!(log::Level::Trace) {
                                 hexdump::hexdump(buf);
                             }
+
                             match stdio {
                                 Stdio::Stdout => {
                                     self.runtime_stats.stdout_bytes += buf.len() as u64
@@ -420,6 +426,18 @@ impl App {
                                     self.runtime_stats.stderr_bytes += buf.len() as u64
                                 }
                             }
+
+                            let buf_len = buf.len();
+                            let filling = self.log_buffer.filling();
+                            let capacity = self.log_buffer.capacity().unwrap_or(0);
+                            log::debug!(
+                                "app {} spliced {} bytes from {} to log buffer ({} / {})",
+                                rt.pid,
+                                buf_len,
+                                stdio,
+                                filling,
+                                capacity,
+                            );
                         }
                         Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
                         // TODO on splice error, read into a buffer but dismiss the content
@@ -434,13 +452,6 @@ impl App {
                         }
                     }
                 }
-
-                log::debug!(
-                    "app {} log buffer filling: {} / {}",
-                    rt.pid,
-                    self.log_buffer.filling(),
-                    self.log_buffer.capacity().unwrap_or(0)
-                );
             }
 
             if event.is_read_closed() {
@@ -775,16 +786,17 @@ impl AppRuntime {
         poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
     ) -> Result<(), AppRuntimeError> {
+        let registry = poll.registry();
         let mut pidfd_sourcefd = SourceFd(&self.pidfd.as_raw_fd());
-        poll.registry().deregister(&mut pidfd_sourcefd)?;
+        registry.deregister(&mut pidfd_sourcefd)?;
         token_slab.free(self.tokens.pidfd);
 
         let mut stdout_sourcefd = SourceFd(&self.stdout.as_raw_fd());
-        poll.registry().deregister(&mut stdout_sourcefd)?;
+        registry.deregister(&mut stdout_sourcefd)?;
         token_slab.free(self.tokens.stdout);
 
         let mut stderr_sourcefd = SourceFd(&self.stderr.as_raw_fd());
-        poll.registry().deregister(&mut stderr_sourcefd)?;
+        registry.deregister(&mut stderr_sourcefd)?;
         token_slab.free(self.tokens.stderr);
 
         // pidfd/pipe fds are OwnedFd, automatically closed on drop
@@ -895,261 +907,5 @@ fn fd_dup(src: impl AsRawFd, dst: impl AsRawFd) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod restart_tests {
-    use crate::{
-        restart::RestartDelay,
-        support::log_buffer::{MemFdBuffer, MemMapBuffer},
-    };
-
-    use super::*;
-
-    fn make_params(restart: RestartPolicy) -> AppParams {
-        AppParams {
-            cwd: PathBuf::from("."),
-            name: "test-app".to_string(),
-            prog: "true".to_string(),
-            args: vec!["true".to_string()],
-            uid: 0,
-            gid: 0,
-            env: Vec::new(),
-            oneshot: false,
-            cgroup: AppCgroupConfig {
-                cpu_weight: None,
-                io_weight: None,
-                memory_hard_limit: None,
-                memory_soft_limit: None,
-                memory_swap_limit: None,
-            },
-            autostart: false,
-            restart,
-        }
-    }
-
-    fn make_app(restart: RestartPolicy) -> App {
-        App {
-            name: "test-app".to_string(),
-            params: make_params(restart),
-            state: State::default(),
-            runtime_stats: AppRuntimeStats::default(),
-            stop_requested: false,
-            log_buffer: Box::new(
-                MemMapBuffer::new_from_memfd(
-                    MemFdBuffer::new_sealed("log", DEFAULT_LOG_BUFFER_SIZE)
-                        .expect("Failed to create log buffer"),
-                )
-                .expect("Failed to create mmap log buffer"),
-            ),
-        }
-    }
-
-    fn pending_deadline(app: &App) -> Instant {
-        match &app.state {
-            State::Stopped(Some(LastExecutionInfo {
-                restart_deadline: Some(deadline),
-                ..
-            })) => *deadline,
-            other => panic!("expected Stopped with restart_deadline, got {:?}", other),
-        }
-    }
-
-    #[test]
-    fn schedule_restart_uses_success_or_error_strategy() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::Constant { delay_ms: 100 },
-            on_error: RestartDelay::Constant { delay_ms: 500 },
-            reset_after_ms: 60_000,
-            max_restart_attempts: None,
-        };
-        let mut app = make_app(policy);
-
-        let before = Instant::now();
-        app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(5));
-        let deadline = pending_deadline(&app);
-        assert!(deadline >= before + Duration::from_millis(100));
-        assert!(deadline < before + Duration::from_millis(500));
-        assert_eq!(app.runtime_stats.consecutive_failures, 0);
-
-        app.state = State::default();
-        let before = Instant::now();
-        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::from_secs(5));
-        let deadline = pending_deadline(&app);
-        assert!(deadline >= before + Duration::from_millis(500));
-        assert_eq!(app.runtime_stats.consecutive_failures, 1);
-    }
-
-    #[test]
-    fn restart_on_failure_only_stops_after_success() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::Never,
-            on_error: RestartDelay::Constant { delay_ms: 100 },
-            reset_after_ms: 60_000,
-            max_restart_attempts: None,
-        };
-        let mut app = make_app(policy);
-
-        // Fails: gets scheduled for restart.
-        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::from_secs(1));
-        assert!(matches!(
-            app.state,
-            State::Stopped(Some(LastExecutionInfo {
-                restart_deadline: Some(..),
-                ..
-            }))
-        ));
-
-        // Succeeds: stays put, no restart is scheduled.
-        app.state = State::Stopped(Some(LastExecutionInfo {
-            restart_deadline: None,
-            cause: ReturnState::Completed { ret: 0 },
-        }));
-        app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(1));
-        assert!(matches!(
-            app.state,
-            State::Stopped(Some(LastExecutionInfo {
-                restart_deadline: None,
-                cause: ReturnState::Completed { ret: 0 }
-            }))
-        ));
-    }
-
-    #[test]
-    fn consecutive_failures_reset_on_success() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::default(),
-            on_error: RestartDelay::ExponentialBackoff {
-                initial_delay_ms: 10,
-                max_delay_ms: 1000,
-                multiplier: 2.0,
-            },
-            reset_after_ms: 60_000,
-            max_restart_attempts: None,
-        };
-        let mut app = make_app(policy);
-
-        app.schedule_restart(
-            ReturnState::Abnormal { signal: 6 },
-            Duration::from_millis(10),
-        );
-        assert_eq!(app.runtime_stats.consecutive_failures, 1);
-        app.state = State::default();
-
-        app.schedule_restart(
-            ReturnState::Abnormal { signal: 6 },
-            Duration::from_millis(10),
-        );
-        assert_eq!(app.runtime_stats.consecutive_failures, 2);
-        app.state = State::default();
-
-        // A clean exit resets the failure streak.
-        app.schedule_restart(ReturnState::Completed { ret: 0 }, Duration::from_secs(1));
-        assert_eq!(app.runtime_stats.consecutive_failures, 0);
-    }
-
-    #[test]
-    fn consecutive_failures_reset_after_long_enough_uptime() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::default(),
-            on_error: RestartDelay::default(),
-            reset_after_ms: 1_000,
-            max_restart_attempts: None,
-        };
-        let mut app = make_app(policy);
-
-        app.schedule_restart(
-            ReturnState::Completed { ret: 1 },
-            Duration::from_millis(500),
-        );
-        assert_eq!(app.runtime_stats.consecutive_failures, 1);
-        app.state = State::default();
-
-        // Ran longer than reset_after_ms before crashing again: streak resets, then this
-        // failure brings it back to 1 rather than 2.
-        app.schedule_restart(
-            ReturnState::Completed { ret: 1 },
-            Duration::from_millis(2_000),
-        );
-        assert_eq!(app.runtime_stats.consecutive_failures, 1);
-    }
-
-    #[test]
-    fn max_restart_attempts_stops_scheduling_further_restarts() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::default(),
-            on_error: RestartDelay::Constant { delay_ms: 0 },
-            reset_after_ms: 60_000,
-            max_restart_attempts: Some(2),
-        };
-        let mut app = make_app(policy);
-
-        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
-        assert!(matches!(
-            app.state,
-            State::Stopped(Some(LastExecutionInfo {
-                restart_deadline: Some(..),
-                ..
-            }))
-        ));
-        app.state = State::default();
-
-        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
-        assert!(matches!(
-            app.state,
-            State::Stopped(Some(LastExecutionInfo {
-                restart_deadline: Some(..),
-                ..
-            }))
-        ));
-        app.state = State::default();
-
-        // Third consecutive failure exceeds max_restart_attempts: give up, no more restarts.
-        app.schedule_restart(ReturnState::Completed { ret: 1 }, Duration::ZERO);
-        assert_eq!(app.runtime_stats.consecutive_failures, 3);
-        assert!(matches!(app.state, State::Stopped(..)));
-    }
-
-    #[test]
-    fn maybe_restart_waits_for_its_deadline() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::default(),
-            on_error: RestartDelay::Constant { delay_ms: 60_000 },
-            reset_after_ms: 60_000,
-            max_restart_attempts: None,
-        };
-        let mut app = make_app(policy);
-        app.schedule_restart(ReturnState::Abnormal { signal: 9 }, Duration::ZERO);
-        let deadline = app.pending_restart_deadline().expect("pending restart");
-
-        let poll = mio::Poll::new().expect("create poll");
-        let mut token_slab = MioTokenSlab::new(8, 0);
-
-        // Deadline is 60s out: nothing should happen yet.
-        app.maybe_restart(Instant::now(), &poll, &mut token_slab, true);
-        assert_eq!(app.pending_restart_deadline(), Some(deadline));
-    }
-
-    #[test]
-    fn maybe_restart_cancelled_on_shutdown() {
-        let policy = RestartPolicy {
-            on_success: RestartDelay::default(),
-            on_error: RestartDelay::Constant { delay_ms: 60_000 },
-            reset_after_ms: 60_000,
-            max_restart_attempts: None,
-        };
-        let mut app = make_app(policy);
-        app.schedule_restart(ReturnState::Abnormal { signal: 9 }, Duration::ZERO);
-        assert!(app.pending_restart_deadline().is_some());
-
-        let poll = mio::Poll::new().expect("create poll");
-        let mut token_slab = MioTokenSlab::new(8, 0);
-
-        app.maybe_restart(Instant::now(), &poll, &mut token_slab, false);
-        assert!(app.pending_restart_deadline().is_none());
-        assert!(matches!(
-            app.state,
-            State::Stopped(Some(LastExecutionInfo {
-                restart_deadline: None,
-                cause: ReturnState::Abnormal { signal: 9 }
-            }))
-        ));
-    }
-}
+#[path = "runtime_tests.rs"]
+mod restart_tests;

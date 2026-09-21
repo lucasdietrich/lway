@@ -3,13 +3,12 @@ apps:
   # - name: ch
   #   command: /var/amy/ch
   #   oneshot: true
-  - name: log0
-    command: /var/amy/logspam -b 1 -o both -i 1000 -s 87 -a -c a
-  - name: log1
-    command: /var/amy/logspam -b 5 -o both -i 10 -s 80 -a -c a
-  - name: log2
-    command: /var/amy/logspam -b 10 -o both -i 100 -s 80 -a -c b
-
+  # - name: log0
+  #   command: /var/amy/logspam -b 1 -o both -i 1000 -s 87 -a -c a
+  # - name: log1
+  #   command: /var/amy/logspam -b 5 -o both -i 10 -s 80 -a -c a
+  # - name: log2
+  #   command: /var/amy/logspam -b 10 -o both -i 100 -s 80 -a -c b
   # - name: s1
   #   command: /home/root/s.sh
   # - name: sh
@@ -25,12 +24,12 @@ apps:
   #       strategy: constant
   #       delay_ms: 1000
   #     max_restart_attempts: 3
-  # - name: lway-cli
-  #   command: /home/root/lway list
-  #   restart:
-  #     on_success:
-  #       strategy: constant
-  #       delay_ms: 1000
+  - name: lway-cli
+    command: /home/root/lway list
+    restart:
+      on_success:
+        strategy: constant
+        delay_ms: 200
   # - name: app
   #   command: /var/amy/app 10
   # - name: test1

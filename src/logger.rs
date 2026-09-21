@@ -46,7 +46,7 @@ impl LoggerSimple for StdoutLogger {
 }
 
 pub trait LogBuffer: AsRawFd {
-    fn as_file(&mut self) -> &mut std::fs::File;
+    fn as_file(&self) -> &std::fs::File;
 
     /// Splices up to `max_len` bytes from `read_fd` (a pipe) into the buffer, returning
     /// the number of bytes written. A buffer may write fewer bytes than requested for
@@ -57,15 +57,47 @@ pub trait LogBuffer: AsRawFd {
         splice(read_fd, self.as_raw_fd(), None, len)
     }
 
-    fn as_mmap(&mut self) -> Option<&mut memmap2::MmapMut> {
-        None
-    }
-
     fn filling(&mut self) -> usize;
 
+    // Todo change signature to `fn capacity(&mut self) -> usize;`
     fn capacity(&mut self) -> Option<usize>;
 }
 
+pub struct LogChunk<'a> {
+    pub buffer: Option<&'a [u8]>,
+    pub missed: usize,
+}
+
+impl<'a> LogChunk<'a> {
+    pub fn new(buffer: Option<&'a [u8]>, missed: usize) -> Self {
+        Self { buffer, missed }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_none() && self.missed == 0
+    }
+}
+
 pub trait ViewableLogBuffer: LogBuffer {
-    fn splice_from2(&mut self, read_fd: RawFd, len: usize) -> io::Result<Option<&[u8]>>;
+    fn splice_from_and_view<'a>(&'a mut self, read_fd: RawFd, len: usize) -> io::Result<Option<&'a [u8]>>;
+
+    /// Total bytes ever written to the buffer; monotonically increasing.
+    fn write_pos(&mut self) -> usize {
+        self.filling()
+    }
+
+    /// Oldest logical offset still retained; bytes before this were overwritten/evicted.
+    fn start_pos(&mut self) -> usize {
+        match self.capacity() {
+            Some(cap) => self.write_pos().saturating_sub(cap),
+            None => 0,
+        }
+    }
+
+    /// Largest contiguous slice of retained data starting at logical offset `from`.
+    /// May be shorter than everything available (e.g. stops at the ring buffer's
+    /// wrap boundary); callers that want everything up to `write_pos()` should call
+    /// this again with the advanced offset. Panics if `from` is older than
+    /// `start_pos()`: the data was overwritten before the caller could read it.
+    fn read_from_cursor(&mut self, from: usize) -> LogChunk<'_>;
 }
