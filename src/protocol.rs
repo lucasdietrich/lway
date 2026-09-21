@@ -97,6 +97,7 @@ pub struct AppConfigSnapshot {
     pub autostart: bool,
     pub restart: RestartPolicy,
     pub cgroup: AppCgroupConfig,
+    pub log_buffer_size: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

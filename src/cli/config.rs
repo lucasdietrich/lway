@@ -47,6 +47,7 @@ struct AppConfigYaml {
     restart: RestartPolicy,
     #[serde(flatten)]
     cgroup: AppCgroupConfig,
+    log_buffer_size: usize,
 }
 
 /// Prints `config` as a standalone YAML app entry.
@@ -69,6 +70,7 @@ pub fn print_config(config: AppConfigSnapshot) {
         autostart: config.autostart,
         restart: config.restart,
         cgroup: config.cgroup,
+        log_buffer_size: config.log_buffer_size,
     };
 
     print!(

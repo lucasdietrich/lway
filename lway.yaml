@@ -1,14 +1,39 @@
 apps_dir: .
+log_buffer_size: 33554432
+max_control_connections: 2
+max_log_connections: 3
 apps:
   # - name: ch
   #   command: /var/amy/ch
   #   oneshot: true
-  # - name: log0
-  #   command: /var/amy/logspam -b 1 -o both -i 1000 -s 87 -a -c a
+  - name: log0
+    command: /var/amy/logspam -b 1 -o both -i 1000 -s 87 -a -c a
   # - name: log1
-  #   command: /var/amy/logspam -b 5 -o both -i 10 -s 80 -a -c a
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
   # - name: log2
-  #   command: /var/amy/logspam -b 10 -o both -i 100 -s 80 -a -c b
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log3
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log4
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log5
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log6
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log7
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log8
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log9
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log10
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log11
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log12
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
+  # - name: log13
+  #   command: /var/amy/logspam -b 1 -o both -i 100 -s 80000 -a -c a
   # - name: s1
   #   command: /home/root/s.sh
   # - name: sh
@@ -24,20 +49,20 @@ apps:
   #       strategy: constant
   #       delay_ms: 1000
   #     max_restart_attempts: 3
-  - name: lway-cli
-    command: /home/root/lway list
-    restart:
-      on_success:
-        strategy: constant
-        delay_ms: 200
+  # - name: lway-cli
+  #   command: /home/root/lway list
+  #   restart:
+  #     on_success:
+  #       strategy: constant
+  #       delay_ms: 200
   # - name: app
-  #   command: /var/amy/app 10
+  #   command: /var/amy/app 100
   # - name: test1
   #   command: /var/amy/test -M 100
   #   cpu_weight: 100
   # - name: test2
   #   command: /var/amy/test -M 100
-  #   cpu_weight: 10
+  #   cpu_weight: 100
   # - name: test3
   #   command: /var/amy/test -M 100
   #   cpu_weight: 5
@@ -65,7 +90,7 @@ apps:
   #   user: 1001
   #   gid: 1001
   # - name: "app1"
-  #   command: "/home/root/app 10"
+  #   command: "/home/root/app 100"
   #   workdir: /home/root
   # - name: invalid
   #   command: invalid

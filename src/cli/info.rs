@@ -113,16 +113,16 @@ pub fn print_info(name: &str, full: &AppFullInfo) {
             .map_or_else(|| "-".to_string(), format_bytes)
     );
     println!(
+        "  retained            {}",
+        format_bytes(debug.log_buffer.write_pos - debug.log_buffer.start_pos)
+    );
+    println!(
         "  write_pos           {}",
         format_bytes(debug.log_buffer.write_pos)
     );
     println!(
         "  start_pos           {}",
         format_bytes(debug.log_buffer.start_pos)
-    );
-    println!(
-        "  retained            {}",
-        format_bytes(debug.log_buffer.write_pos - debug.log_buffer.start_pos)
     );
 }
 

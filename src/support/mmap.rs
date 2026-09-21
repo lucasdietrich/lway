@@ -14,8 +14,13 @@ fn to_mmap_ioresult(addr: *mut libc::c_void) -> std::io::Result<*mut libc::c_voi
     }
 }
 
+/// Size (in bytes) of a page on this system, per `sysconf(_SC_PAGESIZE)`.
+pub fn page_size() -> usize {
+    unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize }
+}
+
 unsafe fn mmap_ring_buffer(fd: RawFd, size: usize) -> std::io::Result<*mut libc::c_void> {
-    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+    let page_size = page_size();
 
     if size % page_size != 0 {
         return Err(std::io::Error::new(

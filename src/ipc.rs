@@ -392,5 +392,6 @@ fn app_config_snapshot(app: &App) -> AppConfigSnapshot {
         autostart: app.autostart(),
         restart: app.restart_policy().clone(),
         cgroup: app.cgroup_config().clone(),
+        log_buffer_size: app.log_buffer_size(),
     }
 }

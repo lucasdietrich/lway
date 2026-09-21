@@ -1,6 +1,6 @@
 use crate::{
     restart::RestartDelay,
-    support::log_buffer::{MemFdBuffer, MemMapBuffer},
+    support::log_buffer::{MemFdBuffer, MemMapBuffer, DEFAULT_LOG_BUFFER_SIZE},
 };
 
 use super::*;
@@ -24,6 +24,7 @@ fn make_params(restart: RestartPolicy) -> AppParams {
         },
         autostart: false,
         restart,
+        log_buffer_size: DEFAULT_LOG_BUFFER_SIZE,
     }
 }
 
@@ -41,6 +42,7 @@ fn make_app(restart: RestartPolicy) -> App {
             )
             .expect("Failed to create mmap log buffer"),
         ),
+        echo_logs: false,
     }
 }
 

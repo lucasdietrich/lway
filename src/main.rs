@@ -133,12 +133,12 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn init() -> Self {
+    pub fn init(max_mio_tokens: usize) -> Self {
         Runtime {
             apps: Vec::new(),
             stopping: false,
             sigint_count: 0,
-            mio_token_slab: MioTokenSlab::new(MAX_MIO_TOKENS, RESERVED_MIO_TOKENS),
+            mio_token_slab: MioTokenSlab::new(max_mio_tokens, RESERVED_MIO_TOKENS),
         }
     }
 }
@@ -189,6 +189,10 @@ fn main() {
         std::process::exit(1);
     });
 
+    let default_log_buffer_size = global_cfg.log_buffer_size;
+    let max_mio_tokens = global_cfg.max_mio_tokens;
+    let max_control_connections = global_cfg.max_control_connections;
+    let max_log_connections = global_cfg.max_log_connections;
     let apps = global_cfg.all_apps(&config_path);
     log::info!("{:#?}", apps);
 
@@ -201,7 +205,7 @@ fn main() {
     };
     let mut signal_sourcefd = SourceFd(&signalfd);
 
-    let mut rt = Runtime::init();
+    let mut rt = Runtime::init(max_mio_tokens);
     // let logger = logger::StdoutLogger::default();
 
     let main_cg = init_main_cgroup();
@@ -231,6 +235,12 @@ fn main() {
             })
             .unwrap_or_else(Vec::new);
 
+        let log_buffer_size = app_cfg.log_buffer_size.unwrap_or(default_log_buffer_size);
+        if let Err(e) = config::validate_log_buffer_size(log_buffer_size) {
+            log::error!("Invalid log_buffer_size for app {}: {}", name, e);
+            std::process::exit(1);
+        }
+
         let params = runtime::AppParams {
             cwd,
             name,
@@ -243,6 +253,7 @@ fn main() {
             cgroup: app_cfg.cgroup,
             autostart: app_cfg.autostart,
             restart: app_cfg.restart,
+            log_buffer_size,
         };
 
         if params.oneshot
@@ -254,11 +265,12 @@ fn main() {
             );
         }
 
-        let app = App::create(params, &poll, &mut rt.mio_token_slab, cli.echo_logs).expect("run_app");
+        let app =
+            App::create(params, &poll, &mut rt.mio_token_slab, cli.echo_logs).expect("run_app");
         rt.apps.push(app);
     }
 
-    let mut ipc_server = ipc::Server::bind(&socket_path, &poll, ipc::DEFAULT_MAX_CONNECTIONS)
+    let mut ipc_server = ipc::Server::bind(&socket_path, &poll, max_control_connections)
         .unwrap_or_else(|e| {
             log::error!(
                 "Failed to bind control socket {}: {}",
@@ -272,7 +284,7 @@ fn main() {
         &log_socket_path,
         &poll,
         LOG_LISTENER_TOKEN,
-        log_ipc::DEFAULT_MAX_CONNECTIONS,
+        max_log_connections,
     )
     .unwrap_or_else(|e| {
         log::error!(
@@ -291,7 +303,7 @@ fn main() {
         )
         .expect("register signal fd");
 
-    let mut events = Events::with_capacity(MAX_MIO_TOKENS);
+    let mut events = Events::with_capacity(max_mio_tokens);
 
     loop {
         let now = Instant::now();

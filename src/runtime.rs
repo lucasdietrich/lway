@@ -25,7 +25,7 @@ use crate::{
     restart::RestartPolicy,
     stats::AppStats,
     support::{
-        log_buffer::{CircularMappedMemFdBuffer, MemFdBuffer, DEFAULT_LOG_BUFFER_SIZE},
+        log_buffer::{CircularMappedMemFdBuffer, MemFdBuffer},
         mio_token_slab::MioTokenSlab,
         pipe::{Pipe, PipeReader},
         signal::signal_name,
@@ -60,6 +60,7 @@ pub struct AppParams {
     pub cgroup: AppCgroupConfig,
     pub autostart: bool, // App automatically starts on creation
     pub restart: RestartPolicy,
+    pub log_buffer_size: usize,
 }
 
 #[derive(Debug)]
@@ -112,7 +113,7 @@ impl App {
         };
 
         let memfd_buffer =
-            MemFdBuffer::new_sealed(&format!("logbuf-{}", params.name), DEFAULT_LOG_BUFFER_SIZE)
+            MemFdBuffer::new_sealed(&format!("logbuf-{}", params.name), params.log_buffer_size)
                 .expect("Failed to create memfd buffer");
         let circ_buffer = CircularMappedMemFdBuffer::new_from_memfd_buffer(memfd_buffer)
             .expect("Failed to create circular log buffer");
@@ -329,6 +330,11 @@ impl App {
 
     pub fn restart_policy(&self) -> &RestartPolicy {
         &self.params.restart
+    }
+
+    /// Configured capacity (in bytes) of this app's log buffer, as set at creation.
+    pub fn log_buffer_size(&self) -> usize {
+        self.params.log_buffer_size
     }
 
     /// Total bytes ever written to this app's log buffer; used as a follow cursor.
