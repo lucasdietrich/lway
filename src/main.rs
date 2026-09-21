@@ -18,6 +18,7 @@ pub mod cgroups;
 pub mod cli;
 pub mod config;
 pub mod ipc;
+pub mod log_ipc;
 pub mod logger;
 pub mod parser;
 pub mod protocol;
@@ -30,13 +31,17 @@ const DEFAULT_CONFIG_PATH: &str = "lway.yaml";
 // world-writable /tmp is fine for local experimentation; a real deployment
 // running as root should keep this under /run.
 const DEFAULT_SOCKET_PATH: &str = "/run/lway.sock";
+// Kept separate from the control socket so raw log bytes never have to share a
+// connection (or its JSON framing) with control requests/responses.
+const DEFAULT_LOG_SOCKET_PATH: &str = "/run/lway-logs.sock";
 
 // Number of SIGINT signals to receive before killing (9) the process
 const SIGINT_THRESHOLD: usize = 2;
 
 pub const UNIX_LISTENER_TOKEN: Token = Token(0);
 pub const SIGNALFD_TOKEN: Token = Token(1);
-pub const RESERVED_MIO_TOKENS: usize = 2;
+pub const LOG_LISTENER_TOKEN: Token = Token(2);
+pub const RESERVED_MIO_TOKENS: usize = 3;
 pub const MAX_MIO_TOKENS: usize = 128;
 
 /// lway - a tiny process supervisor
@@ -55,6 +60,10 @@ struct Cli {
     #[arg(long = "socket")]
     socket: Option<PathBuf>,
 
+    /// Path to the daemon's log-streaming socket
+    #[arg(long = "log-socket")]
+    log_socket: Option<PathBuf>,
+
     /// Run as the background supervisor instead of a CLI client
     #[arg(long = "daemon")]
     daemon: bool,
@@ -62,6 +71,10 @@ struct Cli {
     /// Keep the daemon (and its control socket) running even after all supervised apps have terminated
     #[arg(short = 'k', long = "keep-running")]
     keep_running: bool,
+
+    /// Immediately mirror every captured app stdout/stderr line to the daemon's own stdout/stderr
+    #[arg(long = "echo-logs")]
+    echo_logs: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -102,6 +115,14 @@ pub(crate) enum Command {
         #[arg(short = 'f', long = "force")]
         force: bool,
     },
+    /// Show an app's captured stdout/stderr
+    Log {
+        /// Name of the app to show logs for
+        name: String,
+        /// Keep streaming new log output as it's produced
+        #[arg(short = 'f', long = "follow")]
+        follow: bool,
+    },
 }
 
 pub struct Runtime {
@@ -112,12 +133,12 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn init() -> Self {
+    pub fn init(max_mio_tokens: usize) -> Self {
         Runtime {
             apps: Vec::new(),
             stopping: false,
             sigint_count: 0,
-            mio_token_slab: MioTokenSlab::new(MAX_MIO_TOKENS, RESERVED_MIO_TOKENS),
+            mio_token_slab: MioTokenSlab::new(max_mio_tokens, RESERVED_MIO_TOKENS),
         }
     }
 }
@@ -129,6 +150,10 @@ fn main() {
         .socket
         .clone()
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH));
+    let log_socket_path = cli
+        .log_socket
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_LOG_SOCKET_PATH));
 
     if !cli.daemon {
         let command = cli.command.unwrap_or_else(|| {
@@ -136,7 +161,7 @@ fn main() {
             println!();
             std::process::exit(1);
         });
-        cli::dispatch::run_client_command(command, &socket_path);
+        cli::dispatch::run_client_command(command, &socket_path, &log_socket_path);
         return;
     }
 
@@ -164,6 +189,10 @@ fn main() {
         std::process::exit(1);
     });
 
+    let default_log_buffer_size = global_cfg.log_buffer_size;
+    let max_mio_tokens = global_cfg.max_mio_tokens;
+    let max_control_connections = global_cfg.max_control_connections;
+    let max_log_connections = global_cfg.max_log_connections;
     let apps = global_cfg.all_apps(&config_path);
     log::info!("{:#?}", apps);
 
@@ -176,7 +205,7 @@ fn main() {
     };
     let mut signal_sourcefd = SourceFd(&signalfd);
 
-    let mut rt = Runtime::init();
+    let mut rt = Runtime::init(max_mio_tokens);
     // let logger = logger::StdoutLogger::default();
 
     let main_cg = init_main_cgroup();
@@ -206,6 +235,12 @@ fn main() {
             })
             .unwrap_or_else(Vec::new);
 
+        let log_buffer_size = app_cfg.log_buffer_size.unwrap_or(default_log_buffer_size);
+        if let Err(e) = config::validate_log_buffer_size(log_buffer_size) {
+            log::error!("Invalid log_buffer_size for app {}: {}", name, e);
+            std::process::exit(1);
+        }
+
         let params = runtime::AppParams {
             cwd,
             name,
@@ -218,6 +253,7 @@ fn main() {
             cgroup: app_cfg.cgroup,
             autostart: app_cfg.autostart,
             restart: app_cfg.restart,
+            log_buffer_size,
         };
 
         if params.oneshot
@@ -229,11 +265,12 @@ fn main() {
             );
         }
 
-        let app = App::create(params, &poll, &mut rt.mio_token_slab).expect("run_app");
+        let app =
+            App::create(params, &poll, &mut rt.mio_token_slab, cli.echo_logs).expect("run_app");
         rt.apps.push(app);
     }
 
-    let mut ipc_server = ipc::Server::bind(&socket_path, &poll, ipc::DEFAULT_MAX_CONNECTIONS)
+    let mut ipc_server = ipc::Server::bind(&socket_path, &poll, max_control_connections)
         .unwrap_or_else(|e| {
             log::error!(
                 "Failed to bind control socket {}: {}",
@@ -243,6 +280,21 @@ fn main() {
             std::process::exit(1);
         });
 
+    let mut log_server = log_ipc::LogServer::bind(
+        &log_socket_path,
+        &poll,
+        LOG_LISTENER_TOKEN,
+        max_log_connections,
+    )
+    .unwrap_or_else(|e| {
+        log::error!(
+            "Failed to bind log socket {}: {}",
+            log_socket_path.display(),
+            e
+        );
+        std::process::exit(1);
+    });
+
     poll.registry()
         .register(
             &mut signal_sourcefd,
@@ -251,7 +303,7 @@ fn main() {
         )
         .expect("register signal fd");
 
-    let mut events = Events::with_capacity(MAX_MIO_TOKENS);
+    let mut events = Events::with_capacity(max_mio_tokens);
 
     loop {
         let now = Instant::now();
@@ -270,7 +322,8 @@ fn main() {
 
         for event in events.iter() {
             let token = event.token();
-            log::debug!("poll ready for token: {:?} event: {:?}", token, event);
+
+            log::debug!("poll {}{}", token.0, MioEventDisplay(event));
 
             if token == SIGNALFD_TOKEN {
                 if handle_signal_fd(&signalfd) == libc::SIGINT {
@@ -284,6 +337,13 @@ fn main() {
             if token == UNIX_LISTENER_TOKEN {
                 if let Err(e) = ipc_server.accept_all(&poll, &mut rt.mio_token_slab) {
                     log::error!("failed to accept control connection: {}", e);
+                }
+                continue;
+            }
+
+            if token == LOG_LISTENER_TOKEN {
+                if let Err(e) = log_server.accept_all(&poll, &mut rt.mio_token_slab) {
+                    log::error!("failed to accept log connection: {}", e);
                 }
                 continue;
             }
@@ -312,6 +372,25 @@ fn main() {
                 continue;
             }
 
+            if log_server.is_known(token) {
+                if event.is_readable() {
+                    if let Err(e) = log_server.handle_readable(token, &mut rt.apps) {
+                        log::error!("log connection read error: {}", e);
+                        log_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                if event.is_writable() {
+                    if let Err(e) = log_server.handle_writable(token, &mut rt.apps) {
+                        log::error!("log connection write error: {}", e);
+                        log_server.close(token, &poll, &mut rt.mio_token_slab);
+                        continue;
+                    }
+                }
+                log_server.reconcile(token, &poll, &mut rt.mio_token_slab);
+                continue;
+            }
+
             // Create the equivalent is_known() for applications
             for app in rt.apps.iter_mut() {
                 // TODO optimize this, as finding the app matching the token could be long if there is a lot of apps
@@ -319,6 +398,9 @@ fn main() {
                 app.poll(&poll, &mut rt.mio_token_slab, token, event, !rt.stopping)
             }
         }
+
+        // forward any freshly captured log output to active `log -f` connections
+        log_server.push_updates(&mut rt.apps, &poll, &mut rt.mio_token_slab);
 
         // fire any scheduled restarts whose delay has elapsed
         let now = Instant::now();
@@ -355,5 +437,29 @@ fn main() {
     }
 
     let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&log_socket_path);
     main_cg.delete().expect("Failed to delete main cgroup");
+}
+
+struct MioEventDisplay<'a>(&'a mio::event::Event);
+
+impl std::fmt::Display for MioEventDisplay<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0.is_error() {
+            write!(f, " ERROR")?;
+        }
+        if self.0.is_readable() {
+            write!(f, " READABLE")?;
+        }
+        if self.0.is_writable() {
+            write!(f, " WRITABLE")?;
+        }
+        if self.0.is_read_closed() {
+            write!(f, " READ_CLOSED")?;
+        }
+        if self.0.is_write_closed() {
+            write!(f, " WRITE_CLOSED")?;
+        }
+        Ok(())
+    }
 }

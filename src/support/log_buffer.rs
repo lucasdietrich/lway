@@ -8,13 +8,11 @@ use std::{
 use memmap2::MmapMut;
 
 use crate::{
-    logger::{LogBuffer, ViewableLogBuffer},
-    support::{pipe::splice, to_ioresult},
+    logger::{LogBuffer, LogChunk, ViewableLogBuffer},
+    support::{mmap::MmapRingBuffer, pipe::splice, to_ioresult, KB},
 };
 
-const KB: usize = 1024;
-const MB: usize = 1024 * KB;
-pub const DEFAULT_LOG_BUFFER_SIZE: usize = MB;
+pub const DEFAULT_LOG_BUFFER_SIZE: usize = 64 * KB;
 
 pub trait SealedTrait {}
 
@@ -70,6 +68,12 @@ impl MemFdBuffer {
     }
 }
 
+impl MemFdBuffer<Sealed> {
+    pub fn capacity(&self) -> usize {
+        self.sealed.capacity
+    }
+}
+
 impl<T: SealedTrait> MemFdBuffer<T> {
     pub fn into_file(self) -> File {
         self.file
@@ -77,8 +81,8 @@ impl<T: SealedTrait> MemFdBuffer<T> {
 }
 
 impl LogBuffer for MemFdBuffer<Sealed> {
-    fn as_file(&mut self) -> &mut File {
-        &mut self.file
+    fn as_file(&self) -> &File {
+        &self.file
     }
 
     fn filling(&mut self) -> usize {
@@ -90,11 +94,15 @@ impl LogBuffer for MemFdBuffer<Sealed> {
     fn capacity(&mut self) -> Option<usize> {
         Some(self.sealed.capacity)
     }
+
+    fn kind(&self) -> &'static str {
+        "memfd-sealed"
+    }
 }
 
 impl LogBuffer for MemFdBuffer<Unsealed> {
-    fn as_file(&mut self) -> &mut File {
-        &mut self.file
+    fn as_file(&self) -> &File {
+        &self.file
     }
 
     fn filling(&mut self) -> usize {
@@ -105,6 +113,10 @@ impl LogBuffer for MemFdBuffer<Unsealed> {
 
     fn capacity(&mut self) -> Option<usize> {
         None
+    }
+
+    fn kind(&self) -> &'static str {
+        "memfd"
     }
 }
 
@@ -125,47 +137,39 @@ impl<T: SealedTrait> AsRawFd for MemFdBuffer<T> {
 /// overwrite the oldest data instead of growing (the underlying memfd is sealed at a
 /// fixed size, so it physically cannot grow).
 pub struct CircularMappedMemFdBuffer {
-    file: File,
-    mmap: MmapMut,
+    // file: File,
+    mmap: MmapRingBuffer,
     capacity: usize,
     /// Total bytes ever written; the physical write offset is `write_pos % capacity`.
     write_pos: usize,
 }
 
 impl CircularMappedMemFdBuffer {
-    fn new(file: File, mmap: MmapMut, capacity: usize) -> std::io::Result<Self> {
-        if capacity == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "circular log buffer capacity must be non-zero",
-            ));
-        }
-
+    fn new(mmap: MmapRingBuffer, capacity: usize) -> std::io::Result<Self> {
         Ok(Self {
-            file,
+            // file,
             mmap,
             capacity,
             write_pos: 0,
         })
     }
 
-    pub fn new_from_memfd_buffer(buffer: MemFdBuffer<Sealed>) -> std::io::Result<Self> {
-        let file = buffer.file;
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
-        let capacity = buffer.sealed.capacity;
-        Self::new(file, mmap, capacity)
+    pub fn new_from_memfd_buffer(memfd: MemFdBuffer<Sealed>) -> std::io::Result<Self> {
+        let capacity = memfd.sealed.capacity;
+        let mmap = unsafe { MmapRingBuffer::mmap_memfd(memfd)? };
+        Self::new(mmap, capacity)
     }
 
     pub fn new_from_file(file: File, capacity: usize) -> std::io::Result<Self> {
-        let mmap = unsafe { MmapMut::map_mut(&file)? };
-        Self::new(file, mmap, capacity)
+        let mmap = unsafe { MmapRingBuffer::mmap_file(file, capacity)? };
+        Self::new(mmap, capacity)
     }
 
     pub fn into_file(self) -> File {
-        self.file
+        self.mmap.into_file()
     }
 
-    pub fn get_mmap(&mut self) -> &mut MmapMut {
+    pub fn get_mmap(&mut self) -> &mut MmapRingBuffer {
         &mut self.mmap
     }
 
@@ -189,20 +193,20 @@ impl CircularMappedMemFdBuffer {
 }
 
 impl LogBuffer for CircularMappedMemFdBuffer {
-    fn as_file(&mut self) -> &mut File {
-        &mut self.file
+    fn as_file(&self) -> &File {
+        self.mmap.as_file()
     }
 
     fn splice_from(&mut self, read_fd: RawFd, len: usize) -> std::io::Result<usize> {
-        match self.splice_from2(read_fd, len)? {
+        match self.splice_from_and_view(read_fd, len)? {
             Some(slice) => Ok(slice.len()),
             None => Ok(0),
         }
     }
 
-    fn as_mmap(&mut self) -> Option<&mut memmap2::MmapMut> {
-        Some(&mut self.mmap)
-    }
+    // fn as_mmap(&mut self) -> Option<&mut memmap2::MmapMut> {
+    //     Some(&mut self.mmap)
+    // }
 
     fn filling(&mut self) -> usize {
         self.write_pos
@@ -211,10 +215,18 @@ impl LogBuffer for CircularMappedMemFdBuffer {
     fn capacity(&mut self) -> Option<usize> {
         Some(self.capacity)
     }
+
+    fn kind(&self) -> &'static str {
+        "circular-mmap"
+    }
 }
 
 impl ViewableLogBuffer for CircularMappedMemFdBuffer {
-    fn splice_from2(&mut self, read_fd: RawFd, len: usize) -> std::io::Result<Option<&[u8]>> {
+    fn splice_from_and_view(
+        &mut self,
+        read_fd: RawFd,
+        len: usize,
+    ) -> std::io::Result<Option<&[u8]>> {
         let phys_off = self.write_pos % self.capacity;
 
         // clamp so a single splice never writes past the end of the ring; the
@@ -223,7 +235,7 @@ impl ViewableLogBuffer for CircularMappedMemFdBuffer {
 
         let n = splice(
             read_fd,
-            self.file.as_raw_fd(),
+            self.mmap.as_raw_fd(),
             Some(phys_off as libc::loff_t),
             chunk,
         )?;
@@ -233,17 +245,43 @@ impl ViewableLogBuffer for CircularMappedMemFdBuffer {
             _ => Ok(Some(&self.mmap[phys_off..phys_off + n])),
         }
     }
+
+    fn read_from_cursor(&mut self, from: usize) -> LogChunk<'_> {
+        let start = self.write_pos.saturating_sub(self.capacity);
+        let (from, missed) = if from < start {
+            let missed = start - from;
+            log::warn!(
+                "log buffer cursor {} fell behind retained window (start {}), data was overwritten before being flushed, missed {} bytes",
+                from, start, missed
+            );
+            (start, missed)
+        } else {
+            (from, 0)
+        };
+
+        let len = self.write_pos - from;
+        if len == 0 {
+            return LogChunk::new(None, missed);
+        }
+
+        // clamp to the ring's wrap boundary; the caller re-invokes with the
+        // advanced offset to pick up whatever's left on the other side
+        let start_phys = from % self.capacity;
+        let chunk_len = len.min(self.capacity - start_phys);
+        let buf = &self.mmap[start_phys..start_phys + chunk_len];
+        LogChunk::new(Some(buf), missed)
+    }
 }
 
 impl AsFd for CircularMappedMemFdBuffer {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
-        self.file.as_fd()
+        self.mmap.as_file().as_fd()
     }
 }
 
 impl AsRawFd for CircularMappedMemFdBuffer {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.file.as_raw_fd()
+        self.mmap.as_file().as_raw_fd()
     }
 }
 
@@ -265,31 +303,41 @@ impl MemMapBuffer {
 }
 
 impl LogBuffer for MemMapBuffer {
-    fn as_file(&mut self) -> &mut File {
-        &mut self.file
+    fn as_file(&self) -> &File {
+        &self.file
     }
 
     fn filling(&mut self) -> usize {
         self.mmap.len()
     }
 
-    fn as_mmap(&mut self) -> Option<&mut MmapMut> {
-        Some(&mut self.mmap)
-    }
-
     fn capacity(&mut self) -> Option<usize> {
         Some(self.mmap.len())
+    }
+
+    fn kind(&self) -> &'static str {
+        "mmap"
     }
 }
 
 impl ViewableLogBuffer for MemMapBuffer {
-    fn splice_from2(&mut self, read_fd: RawFd, len: usize) -> std::io::Result<Option<&[u8]>> {
+    fn splice_from_and_view(
+        &mut self,
+        read_fd: RawFd,
+        len: usize,
+    ) -> std::io::Result<Option<&[u8]>> {
         let chunk = len.min(self.mmap.len());
         let n = splice(read_fd, self.file.as_raw_fd(), Some(0), chunk)?;
         match n {
             0 => Ok(None),
             _ => Ok(Some(&self.mmap[0..n])),
         }
+    }
+
+    fn read_from_cursor(&mut self, from: usize) -> LogChunk<'_> {
+        let from = from.min(self.mmap.len());
+        let buf = &self.mmap[from..];
+        LogChunk::new(Some(buf), 0)
     }
 }
 
@@ -329,8 +377,8 @@ impl AsRawFd for DevNullLogBuffer {
 }
 
 impl LogBuffer for DevNullLogBuffer {
-    fn as_file(&mut self) -> &mut File {
-        &mut self.0
+    fn as_file(&self) -> &File {
+        &self.0
     }
 
     fn filling(&mut self) -> usize {
@@ -339,5 +387,9 @@ impl LogBuffer for DevNullLogBuffer {
 
     fn capacity(&mut self) -> Option<usize> {
         None
+    }
+
+    fn kind(&self) -> &'static str {
+        "dev-null"
     }
 }

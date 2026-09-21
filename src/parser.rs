@@ -32,6 +32,9 @@ pub struct AppConfig {
     pub restart: RestartPolicy,
     #[serde(flatten)]
     pub cgroup: AppCgroupConfig,
+    /// Overrides the global `log_buffer_size` default for this app only. Must be
+    /// a multiple of the page size.
+    pub log_buffer_size: Option<usize>,
 }
 
 fn default_autostart() -> bool {

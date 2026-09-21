@@ -18,7 +18,8 @@ use mio::{Interest, Poll, Token};
 use thiserror::Error;
 
 use crate::protocol::{
-    AppConfigSnapshot, AppDebugInfo, AppInfo, Request, Response, StartFailure, StopFailure,
+    AppConfigSnapshot, AppDebugInfo, AppInfo, LogBufferDebugInfo, Request, Response, StartFailure,
+    StopFailure,
 };
 use crate::runtime::App;
 use crate::support::mio_token_slab::MioTokenSlab;
@@ -176,18 +177,20 @@ impl Server {
                 Ok(Request::List) => Response::AppList {
                     apps: apps.iter().map(app_info).collect(),
                 },
-                Ok(Request::Info { name }) => match apps.iter().find(|app| app.name() == name) {
-                    Some(app) => Response::Info {
-                        name: app.name().to_string(),
-                        info: app_info(app),
-                        stats: app.stats(),
-                        debug: app_debug_info(app),
-                    },
-                    None => Response::AppNotFound {
-                        name,
-                        apps: apps.iter().map(|app| app.name().to_string()).collect(),
-                    },
-                },
+                Ok(Request::Info { name }) => {
+                    match apps.iter_mut().find(|app| app.name() == name) {
+                        Some(app) => Response::Info {
+                            name: app.name().to_string(),
+                            info: app_info(app),
+                            stats: app.stats(),
+                            debug: app_debug_info(app),
+                        },
+                        None => Response::AppNotFound {
+                            name,
+                            apps: apps.iter().map(|app| app.name().to_string()).collect(),
+                        },
+                    }
+                }
                 Ok(Request::Config { name }) => match apps.iter().find(|app| app.name() == name) {
                     Some(app) => Response::Config {
                         name: app.name().to_string(),
@@ -364,10 +367,16 @@ fn app_info(app: &App) -> AppInfo {
     }
 }
 
-fn app_debug_info(app: &App) -> AppDebugInfo {
+fn app_debug_info(app: &mut App) -> AppDebugInfo {
     AppDebugInfo {
         cgroup_config: app.cgroup_config().clone(),
         cgroup_path: app.cgroup_path(),
+        log_buffer: LogBufferDebugInfo {
+            kind: app.log_buffer_kind().to_string(),
+            capacity: app.log_buffer_capacity().map(|c| c as u64),
+            write_pos: app.log_write_pos() as u64,
+            start_pos: app.log_start_pos() as u64,
+        },
     }
 }
 
@@ -383,5 +392,6 @@ fn app_config_snapshot(app: &App) -> AppConfigSnapshot {
         autostart: app.autostart(),
         restart: app.restart_policy().clone(),
         cgroup: app.cgroup_config().clone(),
+        log_buffer_size: app.log_buffer_size(),
     }
 }

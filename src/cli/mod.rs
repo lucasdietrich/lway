@@ -12,6 +12,7 @@ pub mod config;
 pub mod dispatch;
 pub mod info;
 pub mod list;
+pub mod logs;
 pub mod start;
 pub mod stop;
 
