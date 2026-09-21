@@ -21,7 +21,7 @@ use crate::{
         init_app_cgroup, read_cgroup_usage, spawn_into_cgroup, wait_for_cgroup_empty,
         AppCgroupConfig, CgroupUsage,
     },
-    logger::{LogBuffer, LogChunk, ViewableLogBuffer},
+    logger::{LogBuffer, LogChunk, LoggerSimple, StdoutLogger, ViewableLogBuffer},
     restart::RestartPolicy,
     stats::AppStats,
     support::{
@@ -91,6 +91,9 @@ pub struct App {
     /// Set by `stop()` to suppress auto-restart of an app the user explicitly stopped.
     stop_requested: bool,
     log_buffer: Box<dyn ViewableLogBuffer>,
+    /// When set, every byte spliced into `log_buffer` is also immediately printed
+    /// to the daemon's own stdout/stderr (mirroring the app's own stream).
+    echo_logs: bool,
 }
 
 impl App {
@@ -98,6 +101,7 @@ impl App {
         params: AppParams,
         poll: &mio::Poll,
         token_slab: &mut MioTokenSlab,
+        echo_logs: bool,
     ) -> Result<Self, AppErr> {
         let state = match params.autostart {
             true => {
@@ -120,6 +124,7 @@ impl App {
             runtime_stats: AppRuntimeStats::default(),
             stop_requested: false,
             log_buffer: Box::new(circ_buffer),
+            echo_logs,
         })
     }
 
@@ -435,6 +440,15 @@ impl App {
                         Ok(Some(buf)) => {
                             if log::log_enabled!(log::Level::Trace) {
                                 hexdump::hexdump(buf);
+                            }
+
+                            if self.echo_logs {
+                                let _ = StdoutLogger::default().log(
+                                    &self.name,
+                                    rt.pid,
+                                    buf,
+                                    stdio == Stdio::Stderr,
+                                );
                             }
 
                             match stdio {

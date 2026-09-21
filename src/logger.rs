@@ -7,11 +7,25 @@ use std::{
 use crate::support::pipe::splice;
 
 pub trait LoggerSimple {
-    fn log_str(&self, name: &str, pid: libc::pid_t, msg: &str) -> Result<(), Box<dyn Error>> {
-        self.log(name, pid, msg.as_bytes())
+    fn log_str(
+        &self,
+        name: &str,
+        pid: libc::pid_t,
+        msg: &str,
+        is_err: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        self.log(name, pid, msg.as_bytes(), is_err)
     }
 
-    fn log(&self, name: &str, pid: libc::pid_t, bytes: &[u8]) -> Result<(), Box<dyn Error>>;
+    /// `is_err` picks the daemon's own stdout vs stderr, mirroring where `bytes`
+    /// came from on the app side.
+    fn log(
+        &self,
+        name: &str,
+        pid: libc::pid_t,
+        bytes: &[u8],
+        is_err: bool,
+    ) -> Result<(), Box<dyn Error>>;
 }
 
 const DEFAULT_GUTTER_WIDTH: usize = 16;
@@ -35,11 +49,21 @@ impl Default for StdoutLogger {
 }
 
 impl LoggerSimple for StdoutLogger {
-    fn log(&self, name: &str, pid: libc::pid_t, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
+    fn log(
+        &self,
+        name: &str,
+        pid: libc::pid_t,
+        bytes: &[u8],
+        is_err: bool,
+    ) -> Result<(), Box<dyn Error>> {
         let string = String::from_utf8_lossy(bytes);
         for line in string.lines() {
             let prefix = format!("[{} {}]", pid, name);
-            println!("{:width$} {}", prefix, line, width = self.gutter_width);
+            if is_err {
+                eprintln!("{:width$} {}", prefix, line, width = self.gutter_width);
+            } else {
+                println!("{:width$} {}", prefix, line, width = self.gutter_width);
+            }
         }
         Ok(())
     }

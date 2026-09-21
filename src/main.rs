@@ -72,6 +72,10 @@ struct Cli {
     #[arg(short = 'k', long = "keep-running")]
     keep_running: bool,
 
+    /// Immediately mirror every captured app stdout/stderr line to the daemon's own stdout/stderr
+    #[arg(long = "echo-logs")]
+    echo_logs: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -250,7 +254,7 @@ fn main() {
             );
         }
 
-        let app = App::create(params, &poll, &mut rt.mio_token_slab).expect("run_app");
+        let app = App::create(params, &poll, &mut rt.mio_token_slab, cli.echo_logs).expect("run_app");
         rt.apps.push(app);
     }
 
