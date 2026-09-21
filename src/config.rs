@@ -26,7 +26,7 @@ pub enum ConfigError {
 /// buffer backing it is mmap-based and requires page-aligned sizes.
 pub fn validate_log_buffer_size(size: usize) -> Result<(), ConfigError> {
     let page_size = crate::support::mmap::page_size();
-    if size % page_size != 0 {
+    if !size.is_multiple_of(page_size) {
         let suggested = size.div_ceil(page_size).max(1) * page_size;
         return Err(ConfigError::InvalidLogBufferSize(
             size, page_size, suggested,

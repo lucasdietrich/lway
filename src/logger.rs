@@ -107,11 +107,11 @@ impl<'a> LogChunk<'a> {
 }
 
 pub trait ViewableLogBuffer: LogBuffer {
-    fn splice_from_and_view<'a>(
-        &'a mut self,
+    fn splice_from_and_view(
+        &mut self,
         read_fd: RawFd,
         len: usize,
-    ) -> io::Result<Option<&'a [u8]>>;
+    ) -> io::Result<Option<&[u8]>>;
 
     /// Total bytes ever written to the buffer; monotonically increasing.
     fn write_pos(&mut self) -> usize {

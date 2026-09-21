@@ -102,6 +102,8 @@ pub struct AppConfigSnapshot {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
+// One-shot IPC responses, not a hot path; boxing the large variant isn't worth the churn.
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     AppList {
         apps: Vec<AppInfo>,

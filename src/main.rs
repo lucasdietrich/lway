@@ -323,7 +323,7 @@ fn main() {
         for event in events.iter() {
             let token = event.token();
 
-            log::debug!("poll {}{}", token.0, MioEventDisplay(&event));
+            log::debug!("poll {}{}", token.0, MioEventDisplay(event));
 
             if token == SIGNALFD_TOKEN {
                 if handle_signal_fd(&signalfd) == libc::SIGINT {

@@ -210,7 +210,7 @@ impl LogServer {
             return Ok(());
         };
 
-        let Some(app) = apps.iter_mut().find(|a| a.name() == &sub.name) else {
+        let Some(app) = apps.iter_mut().find(|a| a.name() == sub.name) else {
             conn.close_after_flush = true;
             return Ok(());
         };

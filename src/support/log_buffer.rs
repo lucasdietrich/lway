@@ -222,11 +222,11 @@ impl LogBuffer for CircularMappedMemFdBuffer {
 }
 
 impl ViewableLogBuffer for CircularMappedMemFdBuffer {
-    fn splice_from_and_view<'a>(
-        &'a mut self,
+    fn splice_from_and_view(
+        &mut self,
         read_fd: RawFd,
         len: usize,
-    ) -> std::io::Result<Option<&'a [u8]>> {
+    ) -> std::io::Result<Option<&[u8]>> {
         let phys_off = self.write_pos % self.capacity;
 
         // clamp so a single splice never writes past the end of the ring; the

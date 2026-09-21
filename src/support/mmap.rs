@@ -22,7 +22,7 @@ pub fn page_size() -> usize {
 unsafe fn mmap_ring_buffer(fd: RawFd, size: usize) -> std::io::Result<*mut libc::c_void> {
     let page_size = page_size();
 
-    if size % page_size != 0 {
+    if !size.is_multiple_of(page_size) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
@@ -82,6 +82,9 @@ pub struct MmapRingBufferInner {
 }
 
 impl MmapRingBufferInner {
+    /// # Safety
+    /// `fd` must refer to a file (e.g. a sealed memfd) at least `size` bytes long,
+    /// and `size` must be a multiple of the page size.
     pub unsafe fn new(fd: RawFd, size: usize) -> std::io::Result<Self> {
         let addr = unsafe { mmap_ring_buffer(fd, size) }?;
         Ok(Self { addr, size })
@@ -102,13 +105,13 @@ pub struct MmapRingBuffer {
 }
 
 impl MmapRingBuffer {
-    pub unsafe fn mmap_file(file: File, size: usize) -> std::io::Result<Self> {
+   pub unsafe fn mmap_file(file: File, size: usize) -> std::io::Result<Self> {
         let inner = unsafe { MmapRingBufferInner::new(file.as_raw_fd(), size) }?;
 
         Ok(Self { file, inner })
     }
 
-    pub unsafe fn mmap_memfd(memfd: MemFdBuffer<Sealed>) -> std::io::Result<Self> {
+   pub unsafe fn mmap_memfd(memfd: MemFdBuffer<Sealed>) -> std::io::Result<Self> {
         let capacity = memfd.capacity();
         let file = memfd.into_file();
         Self::mmap_file(file, capacity)
@@ -141,7 +144,7 @@ impl MmapRingBuffer {
         unsafe { std::slice::from_raw_parts(addr, size) }
     }
 
-    pub fn get_at_mut(&self, offset: usize) -> &mut [u8] {
+    pub fn get_at_mut(&mut self, offset: usize) -> &mut [u8] {
         let (addr, size) = self.get_buffer_infos_at(offset);
         unsafe { std::slice::from_raw_parts_mut(addr as *mut u8, size) }
     }
@@ -161,7 +164,7 @@ impl Index<RangeFrom<usize>> for MmapRingBuffer {
 
     fn index(&self, index: RangeFrom<usize>) -> &Self::Output {
         let buffer = self.get_at(index.start);
-        &buffer[..]
+        buffer
     }
 }
 
